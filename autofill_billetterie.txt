@@ -1,0 +1,177 @@
+// ==UserScript==
+// @name         ANIAPPS -> Billetterie La CLEF
+// @namespace    http://tampermonkey.net/
+// @version      1.2
+// @match        https://laclef.aniapp.fr/admin/families/*/contacts*
+// @match        https://laclef.aniapp.fr/admin/familles/*/contacts*
+// @match        https://billetterie.laclef.asso.fr/*
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+  "use strict";
+
+  const wait = ms => new Promise(r => setTimeout(r, ms));
+
+  function setInput(selector, value) {
+    const input = document.querySelector(selector);
+    if (!input) return false;
+
+    input.focus();
+    input.value = value || "";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    input.blur();
+
+    return true;
+  }
+
+  function getFamilyInfo() {
+    const entries = [...document.querySelectorAll(".datalist-entry")];
+
+    const getValue = label => {
+      const entry = entries.find(e =>
+        e.querySelector("dt")?.textContent.trim().toLowerCase() === label.toLowerCase()
+      );
+
+      return entry?.querySelector("dd")?.innerText.trim().replace(/\s+/g, " ") || "";
+    };
+
+    const email = getValue("Email");
+    const telFixe = getValue("Téléphone fixe");
+    const telMobile = getValue("Téléphone mobile");
+    const adresse = getValue("Adresse");
+    const codePostal = (adresse.match(/\b\d{5}\b/) || [""])[0];
+
+    return {
+      email,
+      telephone: telMobile || telFixe,
+      adresse,
+      codePostal
+    };
+  }
+
+  function addAniappsButtons() {
+    const rows = [...document.querySelectorAll("table tbody tr")];
+
+    rows.forEach(row => {
+      if (row.querySelector(".copy-billetterie-btn")) return;
+
+      const cells = row.querySelectorAll("td");
+      if (cells.length < 5) return;
+
+      const nom = cells[2]?.innerText.trim();
+      const prenom = cells[3]?.innerText.trim();
+
+      if (!nom || !prenom) return;
+
+      const actionsCell = cells[cells.length - 1];
+      if (!actionsCell) return;
+
+      const btn = document.createElement("button");
+      btn.textContent = "🎟 Copier";
+      btn.className = "copy-billetterie-btn";
+      btn.style.marginLeft = "8px";
+      btn.style.padding = "4px 8px";
+      btn.style.border = "none";
+      btn.style.borderRadius = "5px";
+      btn.style.background = "#8e24aa";
+      btn.style.color = "white";
+      btn.style.cursor = "pointer";
+      btn.style.fontWeight = "bold";
+
+      btn.addEventListener("click", async () => {
+        const family = getFamilyInfo();
+
+        const data = {
+          nom,
+          prenom,
+          structure: "La CLEF",
+          email: family.email,
+          telephone: family.telephone,
+          codePostal: family.codePostal,
+          adresse: family.adresse,
+          copiedAt: new Date().toLocaleString()
+        };
+
+        await GM_setValue("billetterie_client", data);
+
+        btn.textContent = "✅ Copié";
+        setTimeout(() => {
+          btn.textContent = "🎟 Copier";
+        }, 1500);
+
+        console.log("Client copié pour billetterie :", data);
+      });
+
+      actionsCell.appendChild(btn);
+    });
+  }
+
+  function addBilletterieButton() {
+    if (document.querySelector("#fill-from-aniapps")) return;
+
+    const btn = document.createElement("button");
+    btn.id = "fill-from-aniapps";
+    btn.textContent = "⚡ Remplir depuis ANIAPPS";
+    btn.style.position = "fixed";
+    btn.style.bottom = "25px";
+    btn.style.right = "25px";
+    btn.style.zIndex = "999999";
+    btn.style.padding = "14px 18px";
+    btn.style.border = "none";
+    btn.style.borderRadius = "8px";
+    btn.style.background = "#8e24aa";
+    btn.style.color = "white";
+    btn.style.fontWeight = "bold";
+    btn.style.cursor = "pointer";
+    btn.style.boxShadow = "0 4px 12px rgba(0,0,0,.25)";
+
+    btn.addEventListener("click", async () => {
+      const data = await GM_getValue("billetterie_client", null);
+
+      if (!data) {
+        alert("Aucune donnée ANIAPPS copiée.");
+        return;
+      }
+
+      setInput("#edit-nom", data.nom);
+      setInput("#edit-prenom", data.prenom);
+      setInput("#edit-structure", data.structure);
+      setInput("#edit-email", data.email);
+      setInput("#edit-telephone", data.telephone);
+      setInput("#edit-code-postal", data.codePostal);
+
+      btn.textContent = "✅ Rempli";
+      setTimeout(() => {
+        btn.textContent = "⚡ Remplir depuis ANIAPPS";
+      }, 1500);
+
+      console.log("Billetterie remplie avec :", data);
+    });
+
+    document.body.appendChild(btn);
+  }
+
+  async function init() {
+    await wait(1000);
+
+    if (location.hostname === "laclef.aniapp.fr") {
+      addAniappsButtons();
+
+      const observer = new MutationObserver(addAniappsButtons);
+      observer.observe(document.body, {
+        childList: true,
+        subtree: true
+      });
+    }
+
+    if (location.hostname === "billetterie.laclef.asso.fr") {
+      addBilletterieButton();
+    }
+  }
+
+  init();
+})();

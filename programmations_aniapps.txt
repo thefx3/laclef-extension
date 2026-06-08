@@ -1,0 +1,137 @@
+// ==UserScript==
+// @name         ANIAPPS Auto Programmations
+// @match        https://laclef.aniapp.fr/admin/activity_schedules/*/edit
+// @grant        none
+// ==/UserScript==
+
+(function () {
+  const wait = ms => new Promise(r => setTimeout(r, ms));
+
+  async function runAniappsAuto() {
+    if (localStorage.getItem("aniapps_auto_enabled") !== "1") return;
+
+    const programmations = JSON.parse(localStorage.getItem("aniapps_programmations") || "[]");
+    let index = Number(localStorage.getItem("aniapps_index") || "0");
+    let mode = localStorage.getItem("aniapps_mode") || "fill";
+
+    if (!programmations.length) return;
+
+    if (index >= programmations.length) {
+      alert("Automatisation terminée.");
+      localStorage.removeItem("aniapps_auto_enabled");
+      localStorage.removeItem("aniapps_mode");
+      return;
+    }
+
+    const setInput = (selector, value) => {
+      const el = document.querySelector(selector);
+      if (!el) throw new Error("Champ introuvable : " + selector);
+      el.value = value;
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+
+    const setSelect = (selector, value) => {
+      const el = document.querySelector(selector);
+      if (!el) throw new Error("Select introuvable : " + selector);
+      el.value = value;
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+
+    const setTarifGroup = (tarif) => {
+      const select = document.querySelector("#activity_schedule_season_pricing_attributes_fee_schedule_id");
+      if (!select) throw new Error("Select groupe tarifaire introuvable");
+
+      const numbers = String(tarif).match(/\d+/g);
+      if (!numbers) return;
+
+      const option = [...select.options].find(o => {
+        const optionNumbers = o.textContent.match(/\d+/g);
+        return optionNumbers && numbers.every(n => optionNumbers.includes(n));
+      });
+
+      if (!option) throw new Error("Groupe tarifaire introuvable pour : " + tarif);
+
+      select.value = option.value;
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+
+      const chosen = document.querySelector(`#s2id_${select.id} .select2-chosen`);
+      if (chosen) chosen.textContent = option.textContent.trim();
+    };
+
+    await wait(1000);
+
+    const p = programmations[index];
+
+    if (mode === "fill") {
+      console.log(`Remplissage ${index + 1}/${programmations.length}`, p.label);
+
+      setInput("#activity_schedule_label", p.label);
+      setInput("#activity_schedule_activity_session_schedules_attributes_0_hour_begin", p.debut);
+      setInput("#activity_schedule_activity_session_schedules_attributes_0_hour_end", p.fin);
+      setInput("#activity_schedule_duration", p.duree);
+
+      setSelect("#activity_schedule_activity_session_schedules_attributes_0_day", p.jour);
+      setSelect("#activity_schedule_activity_session_schedules_attributes_0_place_id", p.salle);
+      setSelect("#activity_schedule_contact_id", p.prof);
+
+      if (p.places) setInput("#activity_schedule_capacity", p.places);
+      if (p.tarif) setTarifGroup(p.tarif);
+
+      localStorage.setItem("aniapps_mode", "clone");
+
+      await wait(800);
+
+      document
+        .querySelector('input[type="submit"][value="Modifier la programmation"]')
+        .click();
+
+      return;
+    }
+
+    if (mode === "clone") {
+      index++;
+      localStorage.setItem("aniapps_index", String(index));
+
+      if (index >= programmations.length) {
+        alert("Dernière fiche enregistrée. Automatisation terminée.");
+        localStorage.removeItem("aniapps_auto_enabled");
+        localStorage.removeItem("aniapps_mode");
+        return;
+      }
+
+      console.log(`Duplication pour ${programmations[index].label}`);
+
+      localStorage.setItem("aniapps_mode", "fill");
+
+      const cloneLink = document.querySelector('a[href*="/clone/7"]');
+      if (!cloneLink) {
+        alert("Lien de duplication 2026-2027 introuvable.");
+        return;
+      }
+
+      cloneLink.click();
+
+      await wait(800);
+
+      const validateButton =
+        document.querySelector("button.confirm") ||
+        [...document.querySelectorAll("button")].find(btn =>
+          btn.textContent.trim().toLowerCase() === "valider"
+        );
+
+      if (!validateButton) {
+        alert("Bouton Valider introuvable.");
+        return;
+      }
+
+      validateButton.click();
+    }
+  }
+
+  runAniappsAuto().catch(err => {
+    console.error(err);
+    alert("Erreur ANIAPPS auto : " + err.message);
+    localStorage.removeItem("aniapps_auto_enabled");
+  });
+})();

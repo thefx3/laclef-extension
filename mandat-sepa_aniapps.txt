@@ -1,0 +1,283 @@
+// ==UserScript==
+// @name         ANIAPPS - SEPA duplication + enregistrer V5
+// @match        https://laclef.aniapp.fr/admin/families/*/payments*
+// @grant        none
+// ==/UserScript==
+
+(function () {
+  "use strict";
+
+  const KEY = "aniapps_sepa_step5";
+  const wait = ms => new Promise(r => setTimeout(r, ms));
+
+  function visibleInput(selector) {
+    return [...document.querySelectorAll(selector)]
+      .find(el => el.offsetParent !== null);
+  }
+
+  function trigger(el) {
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+    el.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true }));
+    el.dispatchEvent(new Event("blur", { bubbles: true }));
+  }
+
+  function setVisibleValue(selector, value) {
+    const el = visibleInput(selector);
+    if (!el) return alert("Champ visible introuvable : " + selector), false;
+
+    el.focus();
+    el.value = value;
+    el.setAttribute("value", value);
+    trigger(el);
+    el.blur();
+    return true;
+  }
+
+  function getFamilyId() {
+    return location.pathname.match(/families\/(\d+)/)?.[1] || "";
+  }
+
+  function getSeasonCode() {
+    const text = document.body.innerText;
+    const match = text.match(/Saison\s*:\s*20(\d{2})-20(\d{2})/i);
+    return match ? `${match[1]}${match[2]}` : prompt("Code saison ?", "2627");
+  }
+
+  function amount(total, count, index) {
+    const totalEuros = Math.round(
+      parseFloat(String(total).replace(",", ".").replace(/[^\d.]/g, ""))
+    );
+
+    const base = Math.floor(totalEuros / count);
+    const value = index === count ? totalEuros - base * (count - 1) : base;
+
+    return `${value},00`;
+  }
+
+  function nextDate(dateStr, wantedDay) {
+    const d = new Date(dateStr + "T12:00:00");
+    d.setMonth(d.getMonth() + 1);
+
+    while (d.getMonth() === 7) d.setMonth(d.getMonth() + 1);
+
+    if (wantedDay === 1 && d.getMonth() === 0) d.setDate(15);
+    else d.setDate(wantedDay);
+
+    return d.toISOString().slice(0, 10);
+  }
+
+  function clickCreateOrUpdatePayment() {
+    const btn = [...document.querySelectorAll("input[type='submit'], button")]
+      .find(b =>
+        /créer un paiement|mettre à jour le paiement/i.test(
+          b.value || b.innerText || ""
+        )
+      );
+
+    if (!btn) return alert("Bouton Créer / Mettre à jour introuvable.");
+    btn.click();
+  }
+
+  async function clickFinalSave() {
+    await wait(800);
+
+    const btn = [...document.querySelectorAll("a, button")]
+      .find(b => /enregistrer le paiement/i.test(b.innerText || b.value || ""));
+
+    if (!btn) return false;
+
+    btn.click();
+    return true;
+  }
+
+  function addButton() {
+    if (document.querySelector("#aniapps-sepa-step5")) return;
+
+    const btn = document.createElement("button");
+    btn.id = "aniapps-sepa-step5";
+    btn.type = "button";
+    btn.textContent = "⚡ Générer SEPA";
+
+    btn.style = `
+      position:fixed;
+      right:20px;
+      bottom:85px;
+      z-index:999999;
+      background:#8e24aa;
+      color:white;
+      border:none;
+      border-radius:8px;
+      padding:12px 18px;
+      font-weight:bold;
+      cursor:pointer;
+      box-shadow:0 4px 12px rgba(0,0,0,.25);
+    `;
+
+    btn.onclick = () => {
+      localStorage.removeItem(KEY);
+
+      const total = prompt("Montant total ?", visibleInput("#payment_amount")?.value || "");
+      const count = Number(prompt("Nombre de mensualités ?", "6"));
+      const firstDate = prompt("Date première mensualité ? AAAA-MM-JJ", "2026-09-15");
+      const wantedDay = Number(prompt("Jour d'encaissement ? 1 ou 15", "15"));
+
+      if (!total || !count || !firstDate || ![1, 15].includes(wantedDay)) return;
+
+      const plan = {
+        total,
+        count,
+        wantedDay,
+        current: 1,
+        currentDate: firstDate,
+        season: getSeasonCode(),
+        familyId: getFamilyId(),
+        step: "fill"
+      };
+
+      localStorage.setItem(KEY, JSON.stringify(plan));
+      fillCurrent();
+    };
+
+    document.body.appendChild(btn);
+  }
+
+    function fillCurrent() {
+        const plan = JSON.parse(localStorage.getItem(KEY) || "null");
+        if (!plan) return;
+
+        if (plan.familyId !== getFamilyId()) {
+            localStorage.removeItem(KEY);
+            return;
+        }
+
+        const ref = `${plan.season}.${plan.familyId}.${plan.current}`;
+
+        setVisibleValue("#payment_amount", amount(plan.total, plan.count, plan.current));
+        setVisibleValue("#payment_reference", ref);
+        setVisibleValue("#payment_expected_cashing_date", plan.currentDate);
+
+        plan.step = "save_final";
+        localStorage.setItem(KEY, JSON.stringify(plan));
+
+        setTimeout(clickCreateOrUpdatePayment, 500);
+    }
+
+  async function duplicateNext() {
+    const plan = JSON.parse(localStorage.getItem(KEY) || "null");
+    if (!plan || plan.step !== "duplicate") return;
+
+    if (plan.familyId !== getFamilyId()) {
+      localStorage.removeItem(KEY);
+      return;
+    }
+
+    await wait(1500);
+
+    if (plan.current >= plan.count) {
+      localStorage.removeItem(KEY);
+      alert("SEPA terminé ✅");
+      return;
+    }
+
+    const arrow = document.querySelector("tbody tr:first-child td.dtr-control");
+
+    if (!arrow) {
+      console.warn("Flèche introuvable, arrêt SEPA.");
+      localStorage.removeItem(KEY);
+      return;
+    }
+
+    arrow.click();
+    await wait(700);
+
+    const duplicate = [...document.querySelectorAll("a")]
+      .find(a =>
+        /dupliquer/i.test(a.innerText || "") ||
+        (a.href || "").includes("/clone")
+      );
+
+    if (!duplicate) {
+      console.warn("Bouton Dupliquer introuvable, arrêt SEPA.");
+      localStorage.removeItem(KEY);
+      return;
+    }
+
+    plan.current += 1;
+    plan.currentDate = nextDate(plan.currentDate, plan.wantedDay);
+    plan.step = "fill";
+    localStorage.setItem(KEY, JSON.stringify(plan));
+
+    duplicate.click();
+
+    await wait(700);
+
+    const confirm = [...document.querySelectorAll("button")]
+      .find(b => /dupliquer/i.test(b.innerText || ""));
+
+    if (confirm) confirm.click();
+  }
+
+  async function main() {
+    const isPaymentPage = /\/admin\/families\/\d+\/payments/.test(location.pathname);
+    if (!isPaymentPage) return;
+
+    addButton();
+
+    const plan = JSON.parse(localStorage.getItem(KEY) || "null");
+
+    if (plan && plan.familyId !== getFamilyId()) {
+      localStorage.removeItem(KEY);
+      return;
+    }
+
+    if (/\/payments\/new/.test(location.pathname) || /\/payments\/\d+\/edit/.test(location.pathname)) {
+      await wait(800);
+
+      if (plan?.step === "fill") {
+        fillCurrent();
+        return;
+      }
+
+      if (plan?.step === "save_final") {
+        const ok = await clickFinalSave();
+
+        plan.step = "duplicate";
+        localStorage.setItem(KEY, JSON.stringify(plan));
+
+        await wait(800);
+        location.href = location.pathname.replace(
+          /\/payments\/\d+\/edit.*/,
+          "/payments"
+        ).replace(
+          /\/payments\/new.*/,
+          "/payments"
+        );
+        return;
+      }
+
+      if (plan?.step === "duplicate") {
+        await wait(800);
+        location.href = location.pathname.replace(
+          /\/payments\/\d+\/edit.*/,
+          "/payments"
+        ).replace(
+          /\/payments\/new.*/,
+          "/payments"
+        );
+        return;
+      }
+    }
+
+    if (/\/payments$/.test(location.pathname)) {
+      duplicateNext();
+    }
+  }
+
+  main();
+
+  setInterval(() => {
+    const isPaymentPage = /\/admin\/families\/\d+\/payments/.test(location.pathname);
+    if (isPaymentPage) addButton();
+  }, 1000);
+})();

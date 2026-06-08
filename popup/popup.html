@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8">
+    <title>La CLEF Assistant</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main>
+      <h1>La CLEF Assistant</h1>
+      <section>
+        <h2>Client billetterie</h2>
+        <div id="client" class="muted">Chargement...</div>
+        <button id="clear-client" type="button">Effacer client copié</button>
+      </section>
+      <section>
+        <h2>Raccourcis</h2>
+        <button id="open-aniapps" type="button">Ouvrir ANIAPPS</button>
+        <button id="open-billetterie" type="button">Ouvrir billetterie</button>
+      </section>
+      <section>
+        <h2>Urgence</h2>
+        <div id="auto-status" class="muted">Stoppe l'auto programmation sur l'onglet actif.</div>
+        <button id="stop-auto" class="danger" type="button">Arreter auto programmations</button>
+        <button id="debug-auto" type="button">Copier diagnostic onglet</button>
+      </section>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

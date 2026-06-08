@@ -1,0 +1,252 @@
+// ==UserScript==
+// @name         ANIAPPS - Paniers activités + prix avec cache
+// @match        https://laclef.aniapp.fr/admin/*
+// @grant        none
+// @run-at       document-idle
+// ==/UserScript==
+
+(async function () {
+  'use strict';
+
+  const CACHE_KEY = "fx_aniapps_pending_checkouts_cache_v1";
+  const wait = ms => new Promise(r => setTimeout(r, ms));
+  let running = false;
+
+  function isPendingCheckoutsPage() {
+    return location.pathname === "/admin/pending_checkouts";
+  }
+
+  function getCache() {
+    try {
+      return JSON.parse(localStorage.getItem(CACHE_KEY) || "{}");
+    } catch {
+      return {};
+    }
+  }
+
+  function setCache(cache) {
+    localStorage.setItem(CACHE_KEY, JSON.stringify(cache));
+  }
+
+  function getCartId(url) {
+    const match = url.match(/pending_checkouts\/(\d+)/);
+    return match ? match[1] : url;
+  }
+
+  function parsePrice(value) {
+    return Number(
+      String(value || "")
+        .replace(/\s/g, "")
+        .replace("€", "")
+        .replace(",", ".")
+        .replace(/[^\d.]/g, "")
+    ) || 0;
+  }
+
+  function formatPrice(value) {
+    return value.toLocaleString("fr-FR", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    }) + " €";
+  }
+
+  async function fetchCartData(url) {
+    const res = await fetch(url, { credentials: "include" });
+    const html = await res.text();
+    const doc = new DOMParser().parseFromString(html, "text/html");
+
+    const activities = [...doc.querySelectorAll("strong.pull-left")]
+      .map(el => el.textContent.trim())
+      .filter(txt =>
+        txt &&
+        !txt.toLowerCase().includes("prix conseillé") &&
+        !txt.toLowerCase().includes("panier")
+      );
+
+    let total = 0;
+
+    [...doc.querySelectorAll("label")].forEach(label => {
+      if (label.textContent.toLowerCase().includes("prix conseillé")) {
+        const group = label.closest(".form-group") || label.parentElement;
+        const input = group?.querySelector("input");
+        if (input) total += parsePrice(input.value);
+      }
+    });
+
+    return {
+      activities,
+      total,
+      updatedAt: Date.now()
+    };
+  }
+
+  function removeColumn(table, headerRow, index) {
+    headerRow.children[index]?.remove();
+
+    [...table.querySelectorAll("tbody tr")].forEach(row => {
+      row.children[index]?.remove();
+    });
+  }
+
+  function renderActivities(td, activities, cached = false) {
+    td.innerHTML = activities?.length
+      ? activities.map(a => `
+        <div style="
+          margin-bottom:4px;
+          padding:4px 6px;
+          background:${cached ? "#eef7ff" : "#f4f4f4"};
+          border-radius:4px;
+          font-size:12px;
+        ">${a}</div>
+      `).join("")
+      : `<span style="color:#999;">Aucune activité</span>`;
+  }
+
+  function renderPrice(td, total, cached = false) {
+    td.innerHTML = `
+      <strong style="color:${cached ? "#2274a5" : "inherit"};">
+        ${formatPrice(total)}
+      </strong>
+    `;
+  }
+
+  function addRefreshButton() {
+    if (document.querySelector("#fx-refresh-cache-btn")) return;
+
+    const exportBtn = [...document.querySelectorAll("button, a")]
+      .find(el => el.textContent.trim().includes("Exporter"));
+
+    const btn = document.createElement("button");
+    btn.id = "fx-refresh-cache-btn";
+    btn.textContent = "↻ Actualiser cache";
+    btn.className = "btn btn-xs btn-primary";
+    btn.style.marginRight = "8px";
+
+    btn.onclick = () => {
+      localStorage.removeItem(CACHE_KEY);
+      document.querySelectorAll("table").forEach(t => delete t.dataset.fxEnhanced);
+      enhanceTable(true);
+    };
+
+    if (exportBtn?.parentElement) {
+      exportBtn.parentElement.insertBefore(btn, exportBtn);
+    }
+  }
+
+  async function enhanceTable(forceRefresh = false) {
+    if (running) return;
+    if (!isPendingCheckoutsPage()) return;
+
+    const table = document.querySelector("table");
+    const headerRow = table?.querySelector("thead tr");
+    const rows = [...(table?.querySelectorAll("tbody tr") || [])];
+
+    if (!table || !headerRow || !rows.length) return;
+    if (table.dataset.fxEnhanced === "1" && !forceRefresh) return;
+
+    running = true;
+    table.dataset.fxEnhanced = "1";
+
+    addRefreshButton();
+
+    for (let i = headerRow.children.length - 1; i >= 0; i--) {
+      const text = headerRow.children[i].textContent.trim();
+
+      if (
+        text === "Activités" ||
+        text === "Validité du panier" ||
+        text === "Temps restant" ||
+        text === "Lien vers le panier (Paiement)"
+      ) {
+        removeColumn(table, headerRow, i);
+      }
+    }
+
+    let priceColumnIndex = -1;
+
+    [...headerRow.children].forEach((th, index) => {
+      if (
+        th.textContent.trim() === "Souscriptions" ||
+        th.textContent.trim() === "Prix total panier"
+      ) {
+        th.textContent = "Prix total panier";
+        priceColumnIndex = index;
+      }
+    });
+
+    const newHeader = document.createElement("th");
+    newHeader.textContent = "Activités";
+    headerRow.insertBefore(newHeader, headerRow.children[2]);
+
+    if (priceColumnIndex >= 2) priceColumnIndex++;
+
+    const cache = getCache();
+    const currentIds = new Set();
+
+    for (const row of [...table.querySelectorAll("tbody tr")]) {
+      const editBtn = row.querySelector('a[href*="/edit"]');
+
+      const tdActivities = document.createElement("td");
+      tdActivities.style.minWidth = "350px";
+      row.insertBefore(tdActivities, row.children[2]);
+
+      if (!editBtn) {
+        tdActivities.innerHTML = "-";
+        continue;
+      }
+
+      const cartId = getCartId(editBtn.href);
+      currentIds.add(cartId);
+
+      if (cache[cartId] && !forceRefresh) {
+        renderActivities(tdActivities, cache[cartId].activities, true);
+
+        if (priceColumnIndex !== -1 && row.children[priceColumnIndex]) {
+          renderPrice(row.children[priceColumnIndex], cache[cartId].total, true);
+        }
+
+        continue;
+      }
+
+      tdActivities.innerHTML = `<span style="color:#999;">Chargement...</span>`;
+
+      try {
+        const data = await fetchCartData(editBtn.href);
+
+        cache[cartId] = data;
+        setCache(cache);
+
+        renderActivities(tdActivities, data.activities, false);
+
+        if (priceColumnIndex !== -1 && row.children[priceColumnIndex]) {
+          renderPrice(row.children[priceColumnIndex], data.total, false);
+        }
+
+      } catch (e) {
+        console.error(e);
+        tdActivities.innerHTML = `<span style="color:red;">Erreur</span>`;
+      }
+
+      await wait(100);
+    }
+
+    Object.keys(cache).forEach(id => {
+      if (!currentIds.has(id)) delete cache[id];
+    });
+
+    setCache(cache);
+    running = false;
+  }
+
+  setInterval(() => enhanceTable(false), 1000);
+
+  const observer = new MutationObserver(() => {
+    enhanceTable(false);
+  });
+
+  observer.observe(document.body, {
+    childList: true,
+    subtree: true
+  });
+
+})();
