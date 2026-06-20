@@ -15,6 +15,7 @@
   const PENDING_AUTO_QUEUE_KEY = "aniapps_music_members_pending_auto_queue";
   const PENDING_AUTO_ERRORS_KEY = "aniapps_music_members_pending_auto_errors";
   const PENDING_AUTO_RETRY_KEY = "aniapps_music_members_pending_auto_retry";
+  const PENDING_AUTO_STATUS_KEY = "aniapps_music_members_auto_status";
   const AUTO_COMPARE_REQUEST_KEY = "aniapps_music_members_compare_request";
   const CONTACTS_SOURCE_CACHE_KEY = "aniapps_music_members_contacts_source";
   const CONTACTS_VISIBLE_CACHE_KEY = "aniapps_music_members_contacts_visible_cache";
@@ -58,6 +59,11 @@
   window.addEventListener("hashchange", init);
   window.addEventListener("load", init);
   window.addEventListener("storage", event => {
+    if (event.key === PENDING_AUTO_STATUS_KEY) {
+      renderAutoProgress();
+      return;
+    }
+
     if (event.key !== AUTO_COMPARE_REQUEST_KEY || !event.newValue || !isPage()) return;
     compareAllRows("Relecture apres Auto tous").catch(error => {
       console.error("[Cahier musique] Comparaison impossible", error);
@@ -269,6 +275,8 @@
               </div>
             </div>
 
+            <div id="fx-mm-auto-progress-inline"></div>
+
             <div class="table-responsive fx-mm-table-wrap">
               <table class="table table-striped table-bordered table-hover fx-mm-table">
                 <thead>
@@ -300,6 +308,7 @@
     }
 
     fillSettings(page);
+    renderAutoProgress();
     renderRows();
   }
 
@@ -729,6 +738,9 @@
 
       const message = `${sourceLabel || "Comparaison"} terminee : ${okCount} conforme(s), ${issueCount} a verifier.`;
       setStatus(message);
+      if (normalize(sourceLabel || "").includes("auto")) {
+        setAutoFinalSummary(message, okCount, issueCount);
+      }
       FX.notify(message, "Cahier musique");
     } finally {
       state.loading = false;
@@ -1744,9 +1756,16 @@
     localStorage.removeItem(PENDING_AUTO_QUEUE_KEY);
     localStorage.removeItem(PENDING_AUTO_ERRORS_KEY);
     localStorage.removeItem(PENDING_AUTO_RETRY_KEY);
+    localStorage.removeItem(PENDING_AUTO_STATUS_KEY);
     localStorage.removeItem(PENDING_ADDRESS_KEY);
     localStorage.removeItem(PENDING_ADHESION_KEY);
     localStorage.removeItem(PENDING_SCHEDULE_KEY);
+    renderAutoProgress();
+
+    debugLog("auto tous - depart", {
+      rows: state.rows.length,
+      season: getSelectedSeason()
+    });
 
     await lookupAllRows();
 
@@ -1759,19 +1778,29 @@
       try {
         await prepareRowForAuto(row);
         const workflow = buildAutoWorkflow(row);
+        autoLog("ligne preparee", workflow, { index: index + 1, total: state.rows.length });
         if (workflow.needsAddressProof || workflow.needsAdhesion || workflow.needsSchedule) {
           workflow.autoAll = true;
           workflow.retryCount = 0;
           workflows.push(workflow);
+          autoLog("ligne ajoutee a la file", workflow, { queueSize: workflows.length });
           row.status = "En file Auto";
           row.statusType = "muted";
           row.details = "";
         } else if (row.match?.contactId) {
+          autoLog("ligne deja complete", workflow);
           row.status = "Deja complet";
           row.statusType = "ok";
           row.details = "";
         }
       } catch (error) {
+        debugLog("auto tous - ligne impossible", {
+          index: index + 1,
+          nom: row.nom,
+          prenom: row.prenom,
+          email: row.email,
+          error: error.message || String(error)
+        });
         row.status = "Auto impossible";
         row.statusType = "danger";
         row.details = error.message || String(error);
@@ -1789,6 +1818,11 @@
     const [first, ...rest] = workflows;
     localStorage.setItem(PENDING_AUTO_QUEUE_KEY, JSON.stringify(rest));
     setStatus(`Auto tous lance : ${workflows.length} contact(s) en file.`);
+    setAutoProgress(`Auto tous lance : ${workflows.length} contact(s) en file.`, first, {
+      queue: rest,
+      total: workflows.length
+    });
+    autoLog("premier contact lance", first, { queueLength: rest.length, total: workflows.length });
     launchAutoWorkflow(first, true).catch(error => {
       blockAutoWorkflow(first, error.message || String(error));
     });
@@ -1839,14 +1873,18 @@
 
   async function launchAutoWorkflow(workflow, openNewTab) {
     if (!workflow?.contactId) return;
+    autoLog("lancement workflow", workflow, { openNewTab: Boolean(openNewTab) });
 
     if (workflow.autoAll && Number(workflow.retryCount || 0) > 0) {
+      autoLog("relecture avant relance", workflow, { retryCount: workflow.retryCount });
       await refreshWorkflowNeeds(workflow);
       if (!workflow.needsAddressProof && !workflow.needsAdhesion && !workflow.needsSchedule) {
         ensureHelperBanner(
           "fx-mm-auto-helper",
           `Contact deja corrige apres relecture : ${workflow.adherent || "contact"}.`
         );
+        setAutoProgress(`Contact deja corrige apres relecture : ${workflow.adherent || "contact"}.`, workflow);
+        autoLog("contact corrige apres relecture", workflow);
         setTimeout(() => launchNextAutoWorkflow(openNewTab), AUTO_STEP_DELAY);
         return;
       }
@@ -1864,6 +1902,8 @@
       workflow.address = { ...(workflow.address || {}), auto: true, workflow: true, createdAt: Date.now() };
       localStorage.setItem(PENDING_AUTO_KEY, JSON.stringify(workflow));
       localStorage.setItem(PENDING_ADDRESS_KEY, JSON.stringify(workflow.address));
+      setAutoProgress(`Etape justificatif : ${workflow.adherent || "contact"}.`, workflow);
+      autoLog("etape justificatif", workflow, { url: `/admin/families/${workflow.familyId}/address_proofs/new` });
       openWorkflowUrl(`/admin/families/${workflow.familyId}/address_proofs/new`, openNewTab);
       return;
     }
@@ -1873,6 +1913,8 @@
       workflow.adhesion = { ...(workflow.adhesion || {}), auto: true, workflow: true, createdAt: Date.now() };
       localStorage.setItem(PENDING_AUTO_KEY, JSON.stringify(workflow));
       localStorage.setItem(PENDING_ADHESION_KEY, JSON.stringify(workflow.adhesion));
+      setAutoProgress(`Etape adhesion : ${workflow.adherent || "contact"}.`, workflow);
+      autoLog("etape adhesion", workflow, { url: `/admin/registrations/new/Adhesion/${workflow.contactId}` });
       openWorkflowUrl(`/admin/registrations/new/Adhesion/${workflow.contactId}`, openNewTab);
       return;
     }
@@ -1882,10 +1924,13 @@
       workflow.schedule = { ...(workflow.schedule || {}), auto: true, workflow: true, createdAt: Date.now() };
       localStorage.setItem(PENDING_AUTO_KEY, JSON.stringify(workflow));
       localStorage.setItem(PENDING_SCHEDULE_KEY, JSON.stringify(workflow.schedule));
+      setAutoProgress(`Etape programmation : ${workflow.adherent || "contact"}.`, workflow);
+      autoLog("etape programmation", workflow, { url: `/admin/registrations/new/ActivitySchedule/${workflow.contactId}` });
       openWorkflowUrl(`/admin/registrations/new/ActivitySchedule/${workflow.contactId}`, openNewTab);
       return;
     }
 
+    autoLog("workflow complet passage suivant", workflow);
     launchNextAutoWorkflow(openNewTab);
   }
 
@@ -1899,9 +1944,17 @@
 
   function launchNextAutoWorkflow(openNewTab) {
     const queue = readStoredJson(PENDING_AUTO_QUEUE_KEY);
+    debugLog("auto tous - passage au suivant", {
+      queueLength: Array.isArray(queue) ? queue.length : 0,
+      openNewTab: Boolean(openNewTab)
+    });
     if (!Array.isArray(queue) || !queue.length) {
       const errors = readStoredJson(PENDING_AUTO_ERRORS_KEY);
       const retryAlreadyDone = readStoredJson(PENDING_AUTO_RETRY_KEY)?.done;
+      debugLog("auto tous - file vide", {
+        errors: Array.isArray(errors) ? errors.length : 0,
+        retryAlreadyDone: Boolean(retryAlreadyDone)
+      });
       if (Array.isArray(errors) && errors.length && !retryAlreadyDone) {
         const retryQueue = errors
           .map(item => ({
@@ -1928,6 +1981,12 @@
         if (retryQueue.length) {
           const [firstRetry, ...restRetry] = retryQueue;
           localStorage.setItem(PENDING_AUTO_QUEUE_KEY, JSON.stringify(restRetry));
+          setAutoProgress(`Auto tous : nouvelle passe sur ${retryQueue.length} contact(s) en erreur.`, firstRetry, {
+            queue: restRetry,
+            total: retryQueue.length,
+            errors: []
+          });
+          autoLog("nouvelle passe erreur", firstRetry, { retryQueueLength: retryQueue.length });
           ensureHelperBanner(
             "fx-mm-auto-helper",
             `Auto tous : nouvelle passe sur ${retryQueue.length} contact(s) en erreur.`
@@ -1944,6 +2003,9 @@
       localStorage.removeItem(PENDING_AUTO_KEY);
       localStorage.removeItem(PENDING_AUTO_QUEUE_KEY);
       localStorage.removeItem(PENDING_AUTO_RETRY_KEY);
+      debugLog("auto tous - termine, relecture demandee", {
+        errors: Array.isArray(errors) ? errors.length : 0
+      });
       localStorage.setItem(AUTO_COMPARE_REQUEST_KEY, JSON.stringify({
         label: "Relecture apres Auto tous",
         errors: Array.isArray(errors) ? errors : [],
@@ -1955,11 +2017,27 @@
           ? `Auto tous termine avec ${errors.length} contact(s) encore en erreur. Relecture lancee.`
           : "Auto tous termine."
       );
+      setAutoProgress(
+        Array.isArray(errors) && errors.length
+          ? `Auto tous termine avec ${errors.length} contact(s) encore en erreur. Relecture lancee.`
+          : "Auto tous termine. Relecture lancee.",
+        null,
+        {
+          mode: "running",
+          errors: Array.isArray(errors) ? errors : [],
+          total: 0
+        }
+      );
       return;
     }
 
     const [next, ...rest] = queue;
     localStorage.setItem(PENDING_AUTO_QUEUE_KEY, JSON.stringify(rest));
+    setAutoProgress(`Auto tous : prochain contact (${next.adherent || "contact"}).`, next, {
+      queue: rest,
+      total: queue.length
+    });
+    autoLog("prochain contact", next, { remainingAfter: rest.length });
     ensureHelperBanner(
       "fx-mm-auto-helper",
       `Auto tous : prochain contact dans quelques secondes (${next.adherent || "contact"}).`
@@ -1976,6 +2054,8 @@
     workflow.transitionAt = Date.now();
     workflow.createdAt = Date.now();
     localStorage.setItem(PENDING_AUTO_KEY, JSON.stringify(workflow));
+    setAutoProgress(`Transition apres ${workflow.stage || "etape"} : ${workflow.adherent || "contact"}.`, workflow);
+    autoLog("transition marquee", workflow);
   }
 
   function resumeExpiredTransition(workflow) {
@@ -2059,6 +2139,7 @@
       needsAdhesion: workflow.needsAdhesion,
       needsSchedule: workflow.needsSchedule
     });
+    setAutoProgress(`Relecture des besoins : ${workflow.adherent || "contact"}.`, workflow);
   }
 
   function blockAutoWorkflow(workflow, reason) {
@@ -2120,6 +2201,11 @@
     localStorage.removeItem(PENDING_ADDRESS_KEY);
     localStorage.removeItem(PENDING_ADHESION_KEY);
     localStorage.removeItem(PENDING_SCHEDULE_KEY);
+    workflow.errorStage = workflow.stage || "";
+    workflow.blocked = true;
+    setAutoProgress(`Erreur notee pour ${workflow.adherent || "contact"} : ${cleanReason}.`, workflow, {
+      errors: nextErrors
+    });
 
     ensureHelperBanner(
       "fx-mm-auto-helper",
@@ -2512,6 +2598,7 @@
 
   function runRouteHelpers() {
     injectStyle();
+    renderAutoProgress();
     cacheVisibleContactsPageRows();
     enhanceFamilyContactsPage();
     if (!claimCurrentAutoWorkflow()) return;
@@ -2537,6 +2624,11 @@
 
     const runnerId = getAutoRunnerId();
     if (workflow.runnerId && workflow.runnerId !== runnerId) {
+      autoLog("runner ignore onglet non proprietaire", workflow, {
+        currentRunnerId: runnerId,
+        ownerRunnerId: workflow.runnerId,
+        path: location.pathname
+      });
       ensureHelperBanner(
         "fx-mm-auto-helper",
         `Auto tous en cours dans un autre onglet : ${workflow.adherent || workflow.label || "contact"}.`
@@ -2554,6 +2646,7 @@
         contactId: workflow.contactId,
         familyId: workflow.familyId
       });
+      setAutoProgress(`Onglet auto assigne : ${workflow.adherent || "contact"}.`, workflow);
     }
 
     return true;
@@ -2656,15 +2749,28 @@
     if (!pending?.contactId || !location.pathname.includes(`/registrations/new/Adhesion/${pending.contactId}`)) return;
 
     const select = document.querySelector("#registration_orderable_id");
+    let selectedAdhesionOk = true;
     if (select) {
-      chooseSeasonOption(select, pending.seasonId, pending.seasonLabel);
-      FX.fireInputEvents(select);
+      selectedAdhesionOk = chooseAdhesionOption(select, pending.seasonLabel);
+      fireSelectEvents(select);
     }
 
     ensureHelperBanner(
       "fx-mm-adhesion-helper",
       `Adhesion cible : ${pending.label || ""}. Saison ${pending.seasonLabel || ""}.`
     );
+
+    if (!selectedAdhesionOk || !selectedAdhesionOptionMatches(select, pending.seasonLabel)) {
+      pending.blocked = true;
+      pending.blockedReason = `Adhesion ${pending.seasonLabel || "selectionnee"} introuvable ou incorrecte. Validation bloquee.`;
+      localStorage.setItem(PENDING_ADHESION_KEY, JSON.stringify(pending));
+      const workflow = readStoredJson(PENDING_AUTO_KEY);
+      if (workflow?.stage === "adhesion" && String(workflow.contactId) === String(pending.contactId)) {
+        blockAutoWorkflow(workflow, pending.blockedReason);
+      }
+      ensureHelperBanner("fx-mm-adhesion-helper", pending.blockedReason);
+      return;
+    }
 
     if (pending.clicked) {
       const elapsed = Date.now() - Number(pending.clickedAt || 0);
@@ -2686,7 +2792,7 @@
       localStorage.setItem(PENDING_ADHESION_KEY, JSON.stringify(pending));
     }
 
-    if (pending.auto && select?.value && !pending.clicked) {
+    if (pending.auto && selectedAdhesionOk && select?.value && !pending.clicked) {
       const button = findSubmitButton("Valider l'enregistrement");
       if (!button) return;
 
@@ -2748,7 +2854,7 @@
       )) || form.querySelector("select");
       if (select) {
         chooseSeasonOption(select, pending.seasonId, pending.seasonLabel);
-        FX.fireInputEvents(select);
+        fireSelectEvents(select);
       }
 
       form.querySelectorAll("input[type='checkbox']").forEach(input => {
@@ -2930,6 +3036,8 @@
     const workflow = readStoredJson(PENDING_AUTO_KEY);
     if (workflow?.stage === "address" && String(workflow.familyId) === String(pending.familyId)) {
       workflow.needsAddressProof = false;
+      setAutoProgress(`Justificatif confirme : ${workflow.adherent || pending.label || "contact"}.`, workflow);
+      autoLog("justificatif confirme", workflow);
       markWorkflowTransition(workflow);
       ensureHelperBanner("fx-mm-address-helper", "Justificatif valide. Passage a l'etape suivante.");
       setTimeout(() => {
@@ -3014,9 +3122,27 @@
   }
 
   function pendingRegistrationFromWorkflow(pendingSchedule, pendingAdhesion) {
-    const workflow = readStoredJson(PENDING_AUTO_KEY);
+    let workflow = readStoredJson(PENDING_AUTO_KEY);
+    const pageKind = registrationPageKind();
+    const onRegistrationRecordPage = /\/admin\/registrations\/\d+(\/edit)?$/.test(location.pathname);
     if (workflow?.contactId && !workflow.blocked && isAutoWorkflowRelevantPage(workflow)) {
-      if (workflow.stage === "adhesion") {
+      const stage = onRegistrationRecordPage && (pageKind === "adhesion" || pageKind === "schedule")
+        ? pageKind
+        : workflow.stage;
+
+      if (stage !== workflow.stage) {
+        const previousStage = workflow.stage;
+        const nextWorkflow = { ...workflow, stage };
+        localStorage.setItem(PENDING_AUTO_KEY, JSON.stringify(nextWorkflow));
+        workflow = nextWorkflow;
+        debugLog("workflow stage ajuste selon fiche ouverte", {
+          previousStage,
+          actualStage: stage,
+          contactId: workflow.contactId
+        });
+      }
+
+      if (stage === "adhesion") {
         localStorage.removeItem(PENDING_SCHEDULE_KEY);
         if (pendingAdhesion?.auto && String(pendingAdhesion.contactId) === String(workflow.contactId)) {
           return { pending: pendingAdhesion, isSchedule: false, key: PENDING_ADHESION_KEY };
@@ -3024,7 +3150,7 @@
         return recoverAdhesionPendingFromWorkflow(workflow);
       }
 
-      if (workflow.stage === "schedule") {
+      if (stage === "schedule") {
         localStorage.removeItem(PENDING_ADHESION_KEY);
         if (pendingSchedule?.auto && String(pendingSchedule.contactId) === String(workflow.contactId)) {
           return { pending: pendingSchedule, isSchedule: true, key: PENDING_SCHEDULE_KEY };
@@ -3033,7 +3159,6 @@
       }
     }
 
-    const pageKind = registrationPageKind();
     if (pageKind === "adhesion") {
       localStorage.removeItem(PENDING_SCHEDULE_KEY);
       if (pendingAdhesion?.auto) return { pending: pendingAdhesion, isSchedule: false, key: PENDING_ADHESION_KEY };
@@ -3096,14 +3221,27 @@
   }
 
   function registrationPageKind() {
-    const text = normalize([
-      document.querySelector(".page-heading")?.textContent || "",
-      document.querySelector("h1, h2")?.textContent || "",
-      document.querySelector(".registration-form")?.textContent || "",
+    const heading = normalize(document.querySelector(".page-heading h1, .page-heading h2, h1, h2, .page-heading")?.textContent || "");
+    const headingTarget = heading.match(/\bpour\s+(.+)$/)?.[1] || "";
+    if (headingTarget) {
+      if (headingTarget.includes("adhesion")) return "adhesion";
+      return "schedule";
+    }
+
+    const primaryText = normalize([
+      document.querySelector("form.registration-form, form[id^='edit_registration']")?.textContent || "",
       document.querySelector(".row.mb-lg, .row.m-b-lg, .table.small")?.textContent || ""
     ].join(" "));
-    if (text.includes("adhesion")) return "adhesion";
-    if (text.includes("programmation") || text.includes("activite")) return "schedule";
+
+    if (/selectionnez l['’ ]adhesion/.test(primaryText) || /\badhesion\s*:/.test(primaryText)) return "adhesion";
+    if (
+      /\bselectionnez la programmation\b/.test(primaryText) ||
+      /\bprogrammation\s*:/.test(primaryText) ||
+      /\bactivite\s*:/.test(primaryText)
+    ) {
+      return "schedule";
+    }
+
     return "";
   }
 
@@ -3183,6 +3321,39 @@
         const workflow = readStoredJson(PENDING_AUTO_KEY);
         if (workflow?.stage === "schedule" && String(workflow.contactId) === String(pending.contactId)) {
           setTimeout(() => confirmAutoWorkflowStage(workflow, "schedule"), 300);
+        }
+        return;
+      }
+    }
+
+    if (!isSchedule) {
+      const check = verifyRegistrationPageAgainstPendingAdhesion(pending);
+      debugLog("verification fiche adhesion", check);
+
+      if (!check.ok) {
+        pending.blocked = true;
+        pending.blockedReason = check.reason;
+        localStorage.setItem(PENDING_ADHESION_KEY, JSON.stringify(pending));
+        const workflow = readStoredJson(PENDING_AUTO_KEY);
+        if (workflow?.stage === "adhesion" && String(workflow.contactId) === String(pending.contactId)) {
+          blockAutoWorkflow(workflow, check.reason);
+        }
+        ensureHelperBanner(
+          "fx-mm-validation-helper",
+          `Validation adhesion bloquee : ${check.reason}. Attendu : ${pending.seasonLabel || ""}. Lu : ${check.actualLabel || "non lu"}.`
+        );
+        return;
+      }
+
+      if (!/\/edit$/.test(location.pathname)) {
+        localStorage.removeItem(PENDING_ADHESION_KEY);
+        ensureHelperBanner(
+          "fx-mm-validation-helper",
+          `Adhesion confirmee : ${check.actualLabel || pending.seasonLabel || ""}.`
+        );
+        const workflow = readStoredJson(PENDING_AUTO_KEY);
+        if (workflow?.stage === "adhesion" && String(workflow.contactId) === String(pending.contactId)) {
+          setTimeout(() => confirmAutoWorkflowStage(workflow, "adhesion"), 300);
         }
         return;
       }
@@ -3382,6 +3553,7 @@
 
   function confirmAutoWorkflowStage(workflow, stage) {
     if (workflow.blocked) return;
+    autoLog("confirmation demandee", workflow, { stage });
     if (workflow.verifyingStep === stage) {
       const age = Date.now() - Number(workflow.verifyingAt || 0);
       if (age < (AUTO_CONFIRM_ATTEMPTS * AUTO_CONFIRM_WAIT) + 5000) return;
@@ -3401,12 +3573,18 @@
     workflow.verifyingAt = Date.now();
     workflow.createdAt = Date.now();
     localStorage.setItem(PENDING_AUTO_KEY, JSON.stringify(workflow));
+    setAutoProgress(
+      stage === "adhesion"
+        ? `Verification adhesion : ${workflow.adherent || "contact"}.`
+        : `Verification programmation : ${workflow.adherent || "contact"}.`,
+      workflow
+    );
 
     ensureHelperBanner(
       "fx-mm-auto-helper",
       stage === "adhesion"
-        ? `Verification de l'adhesion pour ${workflow.adherent || "le contact"}.`
-        : `Verification de la programmation : ${workflow.label || ""}.`
+        ? `Verification de l'adhesion pour ${shortLabel(workflow.adherent || "le contact")}.`
+        : `Verification de la programmation : ${shortLabel(workflow.label || "")}.`
     );
 
     setTimeout(async () => {
@@ -3418,15 +3596,22 @@
         latest.verifyingStep = "";
         latest.verifyingAt = 0;
         latest.createdAt = Date.now();
+        autoLog("confirmation resultat", latest, { stage, confirmed });
 
         if (stage === "adhesion") {
           localStorage.removeItem(PENDING_ADHESION_KEY);
           latest.needsAdhesion = !confirmed;
+          setAutoProgress(
+            confirmed
+              ? `Adhesion confirmee : ${latest.adherent || "contact"}.`
+              : `Adhesion non confirmee : ${latest.adherent || "contact"}.`,
+            latest
+          );
           ensureHelperBanner(
             "fx-mm-auto-helper",
             confirmed
-              ? `Adhesion confirmee. Passage a la programmation : ${latest.label || ""}.`
-              : `Adhesion non confirmee pour ${latest.adherent || "le contact"}. Auto interrompu.`
+              ? `Adhesion confirmee. Passage a la programmation : ${shortLabel(latest.label || "")}.`
+              : `Adhesion non confirmee pour ${shortLabel(latest.adherent || "le contact")}. Auto interrompu.`
           );
           if (confirmed) {
             markWorkflowTransition(latest);
@@ -3444,11 +3629,17 @@
         if (stage === "schedule") {
           localStorage.removeItem(PENDING_SCHEDULE_KEY);
           latest.needsSchedule = !confirmed;
+          setAutoProgress(
+            confirmed
+              ? `Programmation confirmee : ${latest.adherent || "contact"}.`
+              : `Programmation non confirmee : ${latest.adherent || "contact"}.`,
+            latest
+          );
           ensureHelperBanner(
             "fx-mm-auto-helper",
             confirmed
-              ? `Programmation confirmee pour ${latest.adherent || "le contact"}. Passage au suivant.`
-              : `Programmation non confirmee pour ${latest.adherent || "le contact"}. Auto interrompu.`
+              ? `Programmation confirmee pour ${shortLabel(latest.adherent || "le contact")}. Passage au suivant.`
+              : `Programmation non confirmee pour ${shortLabel(latest.adherent || "le contact")}. Auto interrompu.`
           );
           if (confirmed) {
             markWorkflowTransition(latest);
@@ -3523,6 +3714,60 @@
         (short && text.includes(short));
     });
     if (byLabel) select.value = byLabel.value;
+  }
+
+  function chooseAdhesionOption(select, seasonLabel) {
+    if (!select) return false;
+    const match = [...select.options].find(option => selectedAdhesionTextMatches(option.textContent, seasonLabel));
+    if (!match) return false;
+    select.value = match.value;
+    return true;
+  }
+
+  function selectedAdhesionOptionMatches(select, seasonLabel) {
+    if (!select) return false;
+    const option = select.selectedOptions?.[0] || [...select.options].find(item => item.value === select.value);
+    return selectedAdhesionTextMatches(option?.textContent || "", seasonLabel);
+  }
+
+  function selectedAdhesionTextMatches(text, seasonLabel) {
+    const normalizedText = normalizeSeasonText(text);
+    return normalizedText.includes("adhesion") && textMatchesExpectedSeason(normalizedText, seasonLabel);
+  }
+
+  function fireSelectEvents(select) {
+    FX.fireInputEvents(select);
+    const $ = window.jQuery || window.$;
+    if ($) {
+      try {
+        $(select).trigger("change");
+      } catch (error) {
+        debugLog("trigger jQuery change select impossible", error?.message || String(error));
+      }
+    }
+  }
+
+  function textMatchesExpectedSeason(text, seasonLabel) {
+    const normalizedText = normalizeSeasonText(text);
+    const needles = seasonNeedles(seasonLabel);
+    if (!needles.length) return true;
+    return needles.some(needle => normalizedText.includes(needle));
+  }
+
+  function seasonNeedles(seasonLabel) {
+    const label = normalizeSeasonText(String(seasonLabel || "").replace(/^saison\s+/i, ""));
+    const years = label.match(/(\d{4})\s*-\s*(\d{4})/);
+    const values = [];
+    if (years) {
+      values.push(`${years[1]}-${years[2]}`);
+      values.push(`${years[1].slice(2)}-${years[2].slice(2)}`);
+    }
+    if (label) values.push(label);
+    return [...new Set(values.filter(Boolean))];
+  }
+
+  function normalizeSeasonText(value) {
+    return normalize(value).replace(/[\u2010-\u2015\u2212]/g, "-").replace(/\s*-\s*/g, "-");
   }
 
   function isFreshPending(pending) {
@@ -3791,6 +4036,137 @@
     };
   }
 
+  function readRegistrationAdhesionInfo() {
+    const wrapper = document.querySelector("#page-wrapper") || document.body;
+    const heading = cleanText(wrapper.querySelector(".page-heading h1, .page-heading h2, .page-heading, h1, h2")?.textContent || "");
+    const headingLabel = heading.match(/\bpour\s+(.+)$/i)?.[1] || "";
+    const detailLabel = readRegistrationDetailValue("adhesion");
+    const detailSeason = readRegistrationDetailValue("saison");
+    const fullText = cleanText(wrapper.textContent || "");
+    const normalizedFullText = normalizeSeasonText(fullText);
+    const detailMatch = normalizedFullText.match(/adhesion\s*:\s*(adhesion\s+\d{2}-\d{2}(?:\s*\(\d{4}-\d{4}\))?)/);
+    const seasonMatch = normalizedFullText.match(/saison\s*:\s*(\d{4}-\d{4})/);
+    const label = shortLabel(detailLabel || headingLabel || detailMatch?.[1] || "", 80);
+    const seasonLabel = shortLabel(detailSeason || seasonMatch?.[1] || "", 32);
+
+    return {
+      label: cleanText(label),
+      seasonLabel,
+      heading,
+      text: normalizeSeasonText([label, seasonLabel, headingLabel].filter(Boolean).join(" ")),
+      pageText: normalizedFullText
+    };
+  }
+
+  function readRegistrationDetailValue(label) {
+    const wanted = normalize(label);
+    const rows = [...document.querySelectorAll(".table tr, table tr")];
+    for (const row of rows) {
+      const cells = [...row.querySelectorAll("td, th")];
+      const value = readAdjacentCellValue(cells, wanted);
+      if (value) return value;
+    }
+
+    const blocks = [...document.querySelectorAll(".row.mb-lg, .row.m-b-lg, .table.small, .ibox-content")];
+    for (const block of blocks) {
+      const cells = [...block.querySelectorAll("td, th")];
+      const value = readAdjacentCellValue(cells, wanted);
+      if (value) return value;
+    }
+
+    return "";
+  }
+
+  function readAdjacentCellValue(cells, wanted) {
+    for (let index = 0; index < cells.length; index += 1) {
+      const rawCellText = cleanText(cells[index].textContent || "");
+      const cellLabel = normalize(rawCellText).replace(/\s*:\s*$/, "");
+      if (cellLabel !== wanted) {
+        const inlineValue = readInlineLabelValue(rawCellText, wanted);
+        if (inlineValue) return inlineValue;
+        continue;
+      }
+
+      const next = cells[index + 1];
+      const value = cleanText(next?.querySelector("strong")?.textContent || next?.textContent || "");
+      if (value && normalize(value) !== wanted && value.length < 80) return value;
+    }
+    return "";
+  }
+
+  function readInlineLabelValue(text, wanted) {
+    const normalizedWanted = normalize(wanted);
+    const normalizedText = normalize(text);
+    if (!normalizedText.startsWith(`${normalizedWanted} :`) && !normalizedText.startsWith(`${normalizedWanted}:`)) {
+      return "";
+    }
+
+    const value = cleanText(text.replace(/^[^:]+:\s*/, ""));
+    return value && normalize(value) !== normalizedWanted && value.length < 120 ? value : "";
+  }
+
+  function shortLabel(value, limit = 120) {
+    const text = cleanText(value);
+    return text.length > limit ? `${text.slice(0, limit - 1)}...` : text;
+  }
+
+  function verifyRegistrationPageAgainstPendingAdhesion(pending) {
+    const actual = readRegistrationAdhesionInfo();
+    const pageKind = registrationPageKind();
+    const labelText = normalizeSeasonText([
+      actual.text,
+      actual.label,
+      actual.seasonLabel,
+      actual.heading,
+      actual.pageText
+    ].filter(Boolean).join(" "));
+    const pageText = actual.pageText || "";
+    const adherentTokens = significantTokens(pending.label || pending.adherent || "");
+    const adherentOk = !adherentTokens.length || adherentTokens.every(token => pageText.includes(token));
+
+    if (pageKind === "schedule" || (pageKind !== "adhesion" && !labelText.includes("adhesion"))) {
+      return {
+        ok: false,
+        reason: "la fiche ouverte n'est pas une adhesion",
+        actualLabel: actual.label,
+        actual
+      };
+    }
+
+    if (!labelText.includes("adhesion")) {
+      return {
+        ok: false,
+        reason: "libelle adhesion introuvable sur la fiche",
+        actualLabel: actual.label,
+        actual
+      };
+    }
+
+    if (!textMatchesExpectedSeason(labelText, pending.seasonLabel)) {
+      return {
+        ok: false,
+        reason: `saison adhesion incorrecte (${actual.label || actual.seasonLabel || "non lue"})`,
+        actualLabel: actual.label || actual.seasonLabel,
+        actual
+      };
+    }
+
+    if (!adherentOk) {
+      return {
+        ok: false,
+        reason: "adherent different de la ligne du cahier",
+        actualLabel: actual.label,
+        actual
+      };
+    }
+
+    return {
+      ok: true,
+      actualLabel: actual.label || actual.seasonLabel || pending.seasonLabel,
+      actual
+    };
+  }
+
   function findBestScheduleRow(pending) {
     const rows = [...document.querySelectorAll("table[data-datatable='activity-schedules'] tbody tr, table.dataTable tbody tr")]
       .filter(row => cleanText(row.textContent || ""));
@@ -3901,6 +4277,208 @@
         row.classList.add("fx-mm-highlight-row");
       }
     });
+  }
+
+  function autoLog(step, workflow, extra) {
+    debugLog(`auto tous - ${step}`, {
+      adherent: workflow?.adherent || workflow?.label || "",
+      contactId: workflow?.contactId || "",
+      familyId: workflow?.familyId || "",
+      stage: workflow?.stage || "",
+      needsAddressProof: workflow?.needsAddressProof,
+      needsAdhesion: workflow?.needsAdhesion,
+      needsSchedule: workflow?.needsSchedule,
+      queueLength: getAutoQueueLength(),
+      ...(extra || {})
+    });
+  }
+
+  function getAutoQueueLength() {
+    const queue = readStoredJson(PENDING_AUTO_QUEUE_KEY);
+    return Array.isArray(queue) ? queue.length : 0;
+  }
+
+  function setAutoProgress(message, activeWorkflow, options) {
+    const queue = Array.isArray(options?.queue)
+      ? options.queue
+      : (readStoredJson(PENDING_AUTO_QUEUE_KEY) || []);
+    const errors = Array.isArray(options?.errors)
+      ? options.errors
+      : (readStoredJson(PENDING_AUTO_ERRORS_KEY) || []);
+    const queueCount = Array.isArray(queue) ? queue.length : 0;
+    const pendingRows = [
+      ...(activeWorkflow ? [activeWorkflow] : []),
+      ...(Array.isArray(queue) ? queue : [])
+    ];
+    const rows = pendingRows
+      .filter(workflow => workflow?.contactId || workflow?.familyId || workflow?.adherent)
+      .slice(0, 5)
+      .map((workflow, index) => autoProgressRowFromWorkflow(workflow, index === 0 && Boolean(activeWorkflow)));
+
+    const status = {
+      mode: options?.mode || "running",
+      message: cleanText(message || ""),
+      rows,
+      total: Number(options?.total || (activeWorkflow ? 1 : 0) + queueCount),
+      errors: errors.slice(-8).map(item => ({
+        adherent: shortLabel(item.adherent || item.workflow?.adherent || "Contact"),
+        stage: item.stage || item.workflow?.stage || "",
+        reason: shortLabel(item.reason || "Erreur", 140)
+      })),
+      updatedAt: Date.now()
+    };
+
+    localStorage.setItem(PENDING_AUTO_STATUS_KEY, JSON.stringify(status));
+    renderAutoProgress(status);
+  }
+
+  function autoProgressRowFromWorkflow(workflow, active) {
+    const name = shortLabel(workflow.adherent || workflow.label || "Contact");
+    return {
+      name,
+      stage: workflow.stage || "",
+      active: Boolean(active),
+      justif: autoStepLabel(workflow, "address"),
+      adhesion: autoStepLabel(workflow, "adhesion"),
+      prog: autoStepLabel(workflow, "schedule")
+    };
+  }
+
+  function autoStepLabel(workflow, stage) {
+    const key = stage === "address"
+      ? "needsAddressProof"
+      : stage === "adhesion"
+        ? "needsAdhesion"
+        : "needsSchedule";
+    if (workflow.errorStage === stage || (workflow.blocked && workflow.stage === stage)) return "Erreur";
+    if (workflow.stage === stage) return "En cours";
+    if (workflow[key] === false) return "Ok";
+    if (workflow[key] === true) return "En attente";
+    return "-";
+  }
+
+  function setAutoFinalSummary(message, okCount, issueCount) {
+    const issueRows = state.rows.filter(row => row.statusType !== "ok");
+    const sourceRows = (issueRows.length ? issueRows : state.rows).slice(0, 5);
+    const rows = sourceRows.map(row => ({
+      name: shortLabel(`${row.prenom || ""} ${row.nom || ""}`.trim() || row.label || "Contact"),
+      stage: row.status || "",
+      active: false,
+      justif: checkLabel(row.checks?.addressProof),
+      adhesion: checkLabel(row.checks?.adhesion),
+      prog: checkLabel(row.checks?.schedule)
+    }));
+    const errors = issueRows.slice(0, 8).map(row => ({
+      adherent: shortLabel(`${row.prenom || ""} ${row.nom || ""}`.trim() || row.label || "Contact"),
+      stage: row.status || "",
+      reason: shortLabel(row.details || missingChecks(row).join(", ") || "A verifier", 140)
+    }));
+
+    localStorage.setItem(PENDING_AUTO_STATUS_KEY, JSON.stringify({
+      mode: "final",
+      message,
+      rows,
+      total: state.rows.length,
+      okCount,
+      issueCount,
+      errors,
+      updatedAt: Date.now()
+    }));
+    renderAutoProgress();
+  }
+
+  function checkLabel(value) {
+    if (value === "yes") return "Ok";
+    if (value === "no") return "Non";
+    return "-";
+  }
+
+  function renderAutoProgress(status) {
+    const data = status || readStoredJson(PENDING_AUTO_STATUS_KEY);
+    const fixedId = "fx-mm-auto-progress-floating";
+    const fixed = document.querySelector(`#${fixedId}`);
+    const inline = document.querySelector("#fx-mm-auto-progress-inline");
+
+    if (!data?.message && !data?.rows?.length) {
+      fixed?.remove();
+      if (inline) inline.innerHTML = "";
+      return;
+    }
+
+    const html = renderAutoProgressHtml(data);
+    if (inline) inline.innerHTML = html;
+
+    if (!inline) {
+      let banner = fixed;
+      if (!banner) {
+        banner = document.createElement("div");
+        banner.id = fixedId;
+        banner.className = "fx-mm-auto-progress-floating";
+        document.body.appendChild(banner);
+      }
+      banner.innerHTML = html;
+    } else {
+      fixed?.remove();
+    }
+  }
+
+  function renderAutoProgressHtml(data) {
+    const rows = Array.isArray(data.rows) ? data.rows : [];
+    const visibleRows = rows.length ? rows : [{
+      name: "Aucun contact en attente",
+      justif: "-",
+      adhesion: "-",
+      prog: "-"
+    }];
+    const title = data.mode === "final" ? "Recap Auto tous" : "File Auto tous";
+    const meta = data.mode === "final"
+      ? `${Number(data.okCount || 0)} conforme(s), ${Number(data.issueCount || 0)} a verifier.`
+      : `${Math.max(0, Number(data.total || rows.length))} contact(s) en file. ${data.errors?.length ? `${data.errors.length} erreur(s) notee(s).` : ""}`;
+    const errorHtml = data.errors?.length
+      ? `<div class="fx-mm-auto-errors">${data.errors.slice(0, 3).map(item => (
+        `<div><strong>${escapeHtml(item.adherent || "Contact")}</strong> - ${escapeHtml(item.reason || "")}</div>`
+      )).join("")}</div>`
+      : "";
+
+    return `
+      <div class="fx-mm-auto-progress">
+        <div class="fx-mm-auto-progress-head">
+          <strong>${escapeHtml(title)}</strong>
+          <span>${escapeHtml(meta)}</span>
+        </div>
+        <div class="fx-mm-auto-message">${escapeHtml(data.message || "")}</div>
+        <table>
+          <thead>
+            <tr>
+              <th>Adherent</th>
+              <th>Justif</th>
+              <th>Adhesion</th>
+              <th>Prog</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${visibleRows.map(row => `
+              <tr class="${row.active ? "is-active" : ""}">
+                <td>${escapeHtml(row.name || "")}</td>
+                <td>${renderAutoStatusCell(row.justif)}</td>
+                <td>${renderAutoStatusCell(row.adhesion)}</td>
+                <td>${renderAutoStatusCell(row.prog)}</td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+        ${errorHtml}
+      </div>
+    `;
+  }
+
+  function renderAutoStatusCell(value) {
+    const label = cleanText(value || "-");
+    const type = normalize(label);
+    const cls = type.includes("ok") ? "ok" :
+      type.includes("cours") ? "active" :
+        type.includes("erreur") || type.includes("non") ? "danger" : "muted";
+    return `<span class="fx-mm-auto-step fx-mm-auto-step-${cls}">${escapeHtml(label)}</span>`;
   }
 
   function ensureHelperBanner(id, text) {
@@ -4142,6 +4720,115 @@
         right: 22px;
         top: 86px;
         z-index: 2147483647;
+      }
+
+      #fx-mm-auto-progress-inline {
+        margin: 0 0 14px;
+      }
+
+      .fx-mm-auto-progress-floating {
+        max-width: 560px;
+        position: fixed;
+        right: 22px;
+        top: 142px;
+        width: min(560px, calc(100vw - 44px));
+        z-index: 2147483646;
+      }
+
+      .fx-mm-auto-progress {
+        background: #fff;
+        border: 1px solid #d7dce5;
+        border-left: 4px solid #8e24aa;
+        border-radius: 6px;
+        box-shadow: 0 10px 28px rgba(52, 64, 84, 0.16);
+        color: #344054;
+        font: 13px/1.35 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        overflow: hidden;
+      }
+
+      .fx-mm-auto-progress-head {
+        align-items: center;
+        background: #f7f4fb;
+        border-bottom: 1px solid #e4d9ee;
+        display: flex;
+        gap: 12px;
+        justify-content: space-between;
+        padding: 8px 10px;
+      }
+
+      .fx-mm-auto-progress-head strong {
+        color: #344054;
+        font-size: 13px;
+      }
+
+      .fx-mm-auto-progress-head span,
+      .fx-mm-auto-message {
+        color: #667085;
+        font-size: 12px;
+      }
+
+      .fx-mm-auto-message {
+        padding: 8px 10px 0;
+      }
+
+      .fx-mm-auto-progress table {
+        margin: 8px 10px 10px;
+        width: calc(100% - 20px);
+      }
+
+      .fx-mm-auto-progress th,
+      .fx-mm-auto-progress td {
+        border-top: 1px solid #edf0f4;
+        font-size: 12px;
+        padding: 6px 4px;
+        vertical-align: top;
+      }
+
+      .fx-mm-auto-progress th {
+        color: #667085;
+        font-weight: 700;
+        white-space: nowrap;
+      }
+
+      .fx-mm-auto-progress tr.is-active td {
+        background: #faf7fd;
+      }
+
+      .fx-mm-auto-step {
+        border-radius: 999px;
+        display: inline-flex;
+        font-size: 11px;
+        font-weight: 700;
+        line-height: 1;
+        padding: 5px 7px;
+        white-space: nowrap;
+      }
+
+      .fx-mm-auto-step-ok {
+        background: #e8f7ef;
+        color: #1f7a47;
+      }
+
+      .fx-mm-auto-step-active {
+        background: #fff4d6;
+        color: #946200;
+      }
+
+      .fx-mm-auto-step-danger {
+        background: #fdecec;
+        color: #a83b3b;
+      }
+
+      .fx-mm-auto-step-muted {
+        background: #eef1f5;
+        color: #667085;
+      }
+
+      .fx-mm-auto-errors {
+        border-top: 1px solid #edf0f4;
+        color: #a83b3b;
+        font-size: 12px;
+        padding: 8px 10px 10px;
       }
 
       .fx-mm-highlight-row {
