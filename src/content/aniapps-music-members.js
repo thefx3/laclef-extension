@@ -3870,6 +3870,10 @@
     return Date.now() - Number(pending.createdAt || 0) < 1000 * 60 * 10;
   }
 
+  function isFreshAutoStatus(status) {
+    return Date.now() - Number(status.updatedAt || status.createdAt || 0) < 1000 * 60 * 10;
+  }
+
   function clickSubmitButton(label) {
     const button = findSubmitButton(label);
     if (button) button.click();
@@ -4394,6 +4398,16 @@
     return Array.isArray(queue) ? queue.length : 0;
   }
 
+  function hasRunningAutoProgress(data) {
+    if (!data || data.mode === "final") return false;
+
+    const workflow = readStoredJson(PENDING_AUTO_KEY);
+    if (workflow?.contactId && !workflow.blocked && isFreshPending(workflow)) return true;
+
+    const queue = readStoredJson(PENDING_AUTO_QUEUE_KEY);
+    return Array.isArray(queue) && queue.length > 0 && isFreshAutoStatus(data);
+  }
+
   function setAutoProgress(message, activeWorkflow, options) {
     const queue = Array.isArray(options?.queue)
       ? options.queue
@@ -4486,6 +4500,11 @@
     if (inline) inline.innerHTML = html;
 
     if (!inline) {
+      if (!hasRunningAutoProgress(data)) {
+        fixed?.remove();
+        return;
+      }
+
       let banner = fixed;
       if (!banner) {
         banner = document.createElement("div");
