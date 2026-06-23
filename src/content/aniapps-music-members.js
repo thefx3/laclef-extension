@@ -13,9 +13,11 @@
   const PENDING_ADHESION_KEY = "aniapps_music_members_pending_adhesion";
   const PENDING_AUTO_KEY = "aniapps_music_members_pending_auto";
   const PENDING_AUTO_QUEUE_KEY = "aniapps_music_members_pending_auto_queue";
+  const PENDING_AUTO_RUN_KEY = "aniapps_music_members_auto_run";
   const PENDING_AUTO_ERRORS_KEY = "aniapps_music_members_pending_auto_errors";
   const PENDING_AUTO_STATUS_KEY = "aniapps_music_members_auto_status";
   const AUTO_COMPARE_REQUEST_KEY = "aniapps_music_members_compare_request";
+  const AUTO_ROW_REFRESH_REQUEST_KEY = "aniapps_music_members_row_refresh_request";
   const CONTACTS_SOURCE_CACHE_KEY = "aniapps_music_members_contacts_source";
   const CONTACTS_VISIBLE_CACHE_KEY = "aniapps_music_members_contacts_visible_cache";
 
@@ -64,6 +66,14 @@
       return;
     }
 
+    if (event.key === AUTO_ROW_REFRESH_REQUEST_KEY && event.newValue && isPage()) {
+      consumeAutoRowRefreshRequest().catch(error => {
+        console.error("[Cahier musique] Relecture ligne Auto impossible", error);
+        setStatus(error.message || "Relecture ligne Auto impossible.");
+      });
+      return;
+    }
+
     if (event.key !== AUTO_COMPARE_REQUEST_KEY || !event.newValue || !isPage()) return;
     compareAllRows("Relecture apres Auto tous").catch(error => {
       console.error("[Cahier musique] Comparaison impossible", error);
@@ -97,6 +107,12 @@
     if (isPage()) {
       restoreOwnPage();
       setTimeout(renderPage, 80);
+      setTimeout(() => {
+        consumeAutoRowRefreshRequest().catch(error => {
+          console.error("[Cahier musique] Relecture ligne Auto impossible", error);
+          setStatus(error.message || "Relecture ligne Auto impossible.");
+        });
+      }, 250);
       setTimeout(consumeAutoCompareRequest, 400);
     } else {
       restoreOwnPage();
@@ -764,6 +780,84 @@
       console.error("[Cahier musique] Comparaison impossible", error);
       setStatus(error.message || "Comparaison impossible.");
     });
+  }
+
+  async function consumeAutoRowRefreshRequest() {
+    const request = readStoredJson(AUTO_ROW_REFRESH_REQUEST_KEY);
+    if (!request || !isFreshPending(request) || !isPage()) return;
+    if (!state.rows.length || state.loading) {
+      setTimeout(() => {
+        consumeAutoRowRefreshRequest().catch(error => {
+          console.error("[Cahier musique] Relecture ligne Auto impossible", error);
+          setStatus(error.message || "Relecture ligne Auto impossible.");
+        });
+      }, 1000);
+      return;
+    }
+
+    const row = findRowForAutoRefreshRequest(request);
+    if (!row) {
+      localStorage.removeItem(AUTO_ROW_REFRESH_REQUEST_KEY);
+      return;
+    }
+
+    row.status = "Relecture Auto...";
+    row.statusType = "muted";
+    row.details = "";
+    renderRows();
+    setStatus(`Relecture Auto : ${row.email || row.nom || row.label}`);
+
+    try {
+      if (!row.match?.contactId) row.match = await lookupRow(row);
+      if (row.match?.familyId) await enrichRowStatus(row, { force: true });
+
+      const missing = missingChecks(row);
+      if (!row.match?.contactId) {
+        row.status = row.match?.familyId ? "Membre a verifier" : "Introuvable";
+        row.statusType = row.match?.familyId ? "warning" : "danger";
+        row.details = row.match?.familyId
+          ? "Famille trouvee, mais pas le bon Nom + Prenom."
+          : "Aucune famille trouvee avec ce mail.";
+      } else if (missing.length) {
+        row.status = "A completer";
+        row.statusType = "warning";
+        row.details = `Manquant : ${missing.join(", ")}`;
+      } else {
+        row.status = "Conforme";
+        row.statusType = "ok";
+        row.details = "";
+      }
+
+      localStorage.removeItem(AUTO_ROW_REFRESH_REQUEST_KEY);
+      setStatus(`Auto termine, ligne relue : ${row.prenom || ""} ${row.nom || ""}`.trim());
+    } catch (error) {
+      row.status = "Erreur relecture";
+      row.statusType = "danger";
+      row.details = error.message || String(error);
+      setStatus(row.details);
+    } finally {
+      renderRows();
+    }
+  }
+
+  function findRowForAutoRefreshRequest(request) {
+    const contactId = String(request.contactId || "");
+    const familyId = String(request.familyId || "");
+    const wantedName = normalize(`${request.nom || ""} ${request.prenom || ""}`);
+    const wantedReverse = normalize(`${request.prenom || ""} ${request.nom || ""}`);
+    const wantedLabel = normalize(request.label || "");
+
+    return state.rows.find(row => (
+      contactId && String(row.match?.contactId || "") === contactId
+    )) || state.rows.find(row => (
+      familyId &&
+      String(row.match?.familyId || "") === familyId &&
+      (
+        normalize(`${row.nom || ""} ${row.prenom || ""}`) === wantedName ||
+        normalize(`${row.prenom || ""} ${row.nom || ""}`) === wantedReverse ||
+        (wantedLabel && normalize(row.label || "") === wantedLabel)
+      )
+    )) || null;
   }
 
   async function lookupRow(row) {
@@ -1726,6 +1820,7 @@
   }
 
   async function startAutoWorkflow(row) {
+    clearAutoState();
     await prepareRowForAuto(row);
     row.status = "Auto en cours";
     row.statusType = "muted";
@@ -1752,13 +1847,7 @@
       return;
     }
 
-    localStorage.removeItem(PENDING_AUTO_KEY);
-    localStorage.removeItem(PENDING_AUTO_QUEUE_KEY);
-    localStorage.removeItem(PENDING_AUTO_ERRORS_KEY);
-    localStorage.removeItem(PENDING_AUTO_STATUS_KEY);
-    localStorage.removeItem(PENDING_ADDRESS_KEY);
-    localStorage.removeItem(PENDING_ADHESION_KEY);
-    localStorage.removeItem(PENDING_SCHEDULE_KEY);
+    clearAutoState();
     renderAutoProgress();
 
     debugLog("auto tous - depart", {
@@ -1814,18 +1903,67 @@
       return;
     }
 
-    const [first, ...rest] = workflows;
+    const run = createAutoRun(workflows);
+    const [first, ...rest] = run.items;
+    saveAutoRun(run);
     localStorage.setItem(PENDING_AUTO_QUEUE_KEY, JSON.stringify(rest));
     setStatus(`Auto tous lance : ${workflows.length} contact(s) a traiter.`);
     setAutoProgress(`Auto tous lance : ${workflows.length} contact(s) a traiter.`, first, {
       queue: rest,
       total: workflows.length,
-      done: 0
+      done: 0,
+      autoAll: true
     });
     autoLog("premier contact lance", first, { queueLength: rest.length, total: workflows.length });
-    launchAutoWorkflow(first, true).catch(error => {
+    launchPreparedAutoWorkflow(first, true).catch(error => {
       blockAutoWorkflow(first, error.message || String(error));
     });
+  }
+
+  function clearAutoState() {
+    localStorage.removeItem(PENDING_AUTO_KEY);
+    localStorage.removeItem(PENDING_AUTO_QUEUE_KEY);
+    localStorage.removeItem(PENDING_AUTO_RUN_KEY);
+    localStorage.removeItem(PENDING_AUTO_ERRORS_KEY);
+    localStorage.removeItem(PENDING_AUTO_STATUS_KEY);
+    localStorage.removeItem(PENDING_ADDRESS_KEY);
+    localStorage.removeItem(PENDING_ADHESION_KEY);
+    localStorage.removeItem(PENDING_SCHEDULE_KEY);
+    localStorage.removeItem(AUTO_COMPARE_REQUEST_KEY);
+    localStorage.removeItem(AUTO_ROW_REFRESH_REQUEST_KEY);
+  }
+
+  function createAutoRun(workflows) {
+    return {
+      runId: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      items: workflows.map((workflow, index) => ({
+        ...workflow,
+        autoAll: true,
+        runIndex: index,
+        runTotal: workflows.length
+      })),
+      index: 0,
+      total: workflows.length,
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    };
+  }
+
+  function readAutoRun() {
+    const run = readStoredJson(PENDING_AUTO_RUN_KEY);
+    if (!run || !Array.isArray(run.items) || !run.items.length) return null;
+    if (!isFreshAutoStatus(run)) {
+      localStorage.removeItem(PENDING_AUTO_RUN_KEY);
+      return null;
+    }
+    return run;
+  }
+
+  function saveAutoRun(run) {
+    localStorage.setItem(PENDING_AUTO_RUN_KEY, JSON.stringify({
+      ...run,
+      updatedAt: Date.now()
+    }));
   }
 
   async function prepareRowForAuto(row) {
@@ -1858,6 +1996,7 @@
       type: row.type,
       instrument: row.instrument || state.settings.instrument,
       label: row.label,
+      email: row.email || "",
       adherent: `${row.prenom} ${row.nom}`,
       seasonId: row.seasonId || getSelectedSeason().id,
       seasonLabel: row.seasonLabel || getSelectedSeason().label,
@@ -1869,6 +2008,24 @@
       schedule: buildPendingSchedule(row, match, true),
       adhesion: buildPendingAdhesion(row, match, true)
     };
+  }
+
+  async function launchPreparedAutoWorkflow(workflow, openNewTab) {
+    if (workflow?.autoAll) {
+      await refreshWorkflowNeeds(workflow);
+      if (!workflow.needsAddressProof && !workflow.needsAdhesion && !workflow.needsSchedule) {
+        ensureHelperBanner(
+          "fx-mm-auto-helper",
+          `Contact deja complet au moment du passage : ${workflow.adherent || "contact"}.`
+        );
+        setAutoProgress(`Contact deja complet : ${workflow.adherent || "contact"}.`, workflow);
+        autoLog("contact deja complet avant lancement", workflow);
+        setTimeout(() => launchNextAutoWorkflow(openNewTab, { completed: true, workflow }), AUTO_STEP_DELAY);
+        return;
+      }
+    }
+
+    await launchAutoWorkflow(workflow, openNewTab);
   }
 
   async function launchAutoWorkflow(workflow, openNewTab) {
@@ -1885,7 +2042,7 @@
         );
         setAutoProgress(`Contact deja corrige apres relecture : ${workflow.adherent || "contact"}.`, workflow);
         autoLog("contact corrige apres relecture", workflow);
-        setTimeout(() => launchNextAutoWorkflow(openNewTab, { completed: true }), AUTO_STEP_DELAY);
+        setTimeout(() => launchNextAutoWorkflow(openNewTab, { completed: true, workflow }), AUTO_STEP_DELAY);
         return;
       }
     }
@@ -1931,7 +2088,39 @@
     }
 
     autoLog("workflow complet passage suivant", workflow);
-    launchNextAutoWorkflow(openNewTab, { completed: true });
+    completeAutoWorkflow(workflow, openNewTab, { completed: true, workflow });
+  }
+
+  function completeAutoWorkflow(workflow, openNewTab, options) {
+    if (isAutoAllWorkflow(workflow)) {
+      launchNextAutoWorkflow(openNewTab, options);
+      return;
+    }
+
+    finishSingleAutoWorkflow(workflow);
+  }
+
+  function finishSingleAutoWorkflow(workflow) {
+    localStorage.removeItem(PENDING_AUTO_KEY);
+    localStorage.removeItem(PENDING_ADDRESS_KEY);
+    localStorage.removeItem(PENDING_ADHESION_KEY);
+    localStorage.removeItem(PENDING_SCHEDULE_KEY);
+    localStorage.removeItem(PENDING_AUTO_STATUS_KEY);
+
+    localStorage.setItem(AUTO_ROW_REFRESH_REQUEST_KEY, JSON.stringify({
+      contactId: workflow.contactId || "",
+      familyId: workflow.familyId || "",
+      nom: workflow.nom || "",
+      prenom: workflow.prenom || "",
+      email: workflow.email || "",
+      label: workflow.label || "",
+      createdAt: Date.now()
+    }));
+
+    ensureHelperBanner(
+      "fx-mm-auto-helper",
+      `Auto termine pour ${workflow.adherent || workflow.label || "ce contact"}. Relecture de la ligne demandee.`
+    );
   }
 
   function openWorkflowUrl(url, openNewTab) {
@@ -1943,7 +2132,33 @@
   }
 
   function launchNextAutoWorkflow(openNewTab, options) {
+    const run = updateAutoRunProgress(options);
     if (options?.completed) markAutoProgressCompleted();
+
+    if (run && Number(run.index || 0) < Number(run.total || run.items.length || 0)) {
+      const nextIndex = Number(run.index || 0);
+      const next = run.items[nextIndex];
+      const rest = run.items.slice(nextIndex + 1);
+      localStorage.setItem(PENDING_AUTO_QUEUE_KEY, JSON.stringify(rest));
+      setAutoProgress(`Auto tous : ${next.adherent || "contact"}.`, next, {
+        queue: rest,
+        total: run.total || run.items.length,
+        done: nextIndex,
+        autoAll: true
+      });
+      autoLog("prochain contact depuis run", next, {
+        index: nextIndex + 1,
+        total: run.total || run.items.length,
+        remainingAfter: rest.length
+      });
+      setTimeout(() => {
+        launchPreparedAutoWorkflow(next, Boolean(openNewTab)).catch(error => {
+          blockAutoWorkflow(next, error.message || String(error));
+        });
+      }, AUTO_STEP_DELAY);
+      return;
+    }
+
     const queue = readStoredJson(PENDING_AUTO_QUEUE_KEY);
     debugLog("auto tous - passage au suivant", {
       queueLength: Array.isArray(queue) ? queue.length : 0,
@@ -1957,6 +2172,7 @@
 
       localStorage.removeItem(PENDING_AUTO_KEY);
       localStorage.removeItem(PENDING_AUTO_QUEUE_KEY);
+      localStorage.removeItem(PENDING_AUTO_RUN_KEY);
       debugLog("auto tous - termine, relecture demandee", {
         errors: Array.isArray(errors) ? errors.length : 0
       });
@@ -1996,10 +2212,29 @@
       `Auto tous : prochain contact dans quelques secondes (${next.adherent || "contact"}).`
     );
     setTimeout(() => {
-      launchAutoWorkflow(next, Boolean(openNewTab)).catch(error => {
+      launchPreparedAutoWorkflow(next, Boolean(openNewTab)).catch(error => {
         blockAutoWorkflow(next, error.message || String(error));
       });
     }, AUTO_STEP_DELAY);
+  }
+
+  function updateAutoRunProgress(options) {
+    const run = readAutoRun();
+    if (!run) return null;
+
+    const currentIndex = Number(run.index || 0);
+    const workflowIndex = Number(options?.workflow?.runIndex);
+    const nextIndex = options?.completed
+      ? (Number.isFinite(workflowIndex) ? Math.max(currentIndex, workflowIndex + 1) : currentIndex + 1)
+      : currentIndex;
+
+    const nextRun = {
+      ...run,
+      index: Math.min(nextIndex, Number(run.total || run.items.length || 0)),
+      updatedAt: Date.now()
+    };
+    saveAutoRun(nextRun);
+    return nextRun;
   }
 
   function markWorkflowTransition(workflow) {
@@ -2107,12 +2342,12 @@
     workflow.transitionAt = 0;
     workflow.createdAt = Date.now();
     localStorage.setItem(PENDING_AUTO_KEY, JSON.stringify(workflow));
-    ensureHelperBanner("fx-mm-auto-helper", `Auto tous interrompu : ${reason}`);
-    FX.notify(`Auto tous interrompu : ${reason}`, "Cahier musique");
+    ensureHelperBanner("fx-mm-auto-helper", `Auto interrompu : ${reason}`);
   }
 
   function isAutoAllWorkflow(workflow) {
     if (workflow?.autoAll) return true;
+    if (readAutoRun()) return true;
     const queue = readStoredJson(PENDING_AUTO_QUEUE_KEY);
     return Array.isArray(queue);
   }
@@ -2125,7 +2360,7 @@
     localStorage.removeItem(PENDING_ADHESION_KEY);
     localStorage.removeItem(PENDING_SCHEDULE_KEY);
 
-    if (retryCount < AUTO_STAGE_RETRIES) {
+    if (!isScheduleCapacityReason(workflow, cleanReason) && retryCount < AUTO_STAGE_RETRIES) {
       const retryWorkflow = {
         ...workflow,
         autoAll: true,
@@ -2206,7 +2441,17 @@
     );
     debugLog("auto tous erreur notee", errorItem);
 
-    setTimeout(() => launchNextAutoWorkflow(false, { completed: true }), AUTO_STEP_DELAY);
+    setTimeout(() => launchNextAutoWorkflow(false, { completed: true, workflow }), AUTO_STEP_DELAY);
+  }
+
+  function isScheduleCapacityReason(workflow, reason) {
+    if (workflow?.stage !== "schedule") return false;
+
+    const text = normalize(reason || "");
+    return text.includes("plus de place") ||
+      text.includes("non disponible") ||
+      text.includes("complete") ||
+      text.includes("complet");
   }
 
   function buildPendingAdhesion(row, match, workflow) {
@@ -3157,6 +3402,20 @@
           debugLog("creation programmation bloquee", { error: pending.blockedReason, pending });
         }
       } else {
+        const unavailable = findUnavailableScheduleRow(pending);
+        if (unavailable) {
+          pending.blocked = true;
+          pending.blockedReason = "Programmation non disponible ou complete : plus de place.";
+          pending.unavailableRow = unavailable.text;
+          localStorage.setItem(PENDING_SCHEDULE_KEY, JSON.stringify(pending));
+          const workflow = readStoredJson(PENDING_AUTO_KEY);
+          if (workflow?.stage === "schedule" && String(workflow.contactId) === String(pending.contactId)) {
+            blockAutoWorkflow(workflow, pending.blockedReason);
+          }
+          ensureHelperBanner("fx-mm-schedule-helper", pending.blockedReason);
+          return;
+        }
+
         pending.noReliableMatchCount = Number(pending.noReliableMatchCount || 0) + 1;
         localStorage.setItem(PENDING_SCHEDULE_KEY, JSON.stringify(pending));
         debugLog("programmation non cliquee verification insuffisante", {
@@ -3580,6 +3839,7 @@
     if (workflow && !isFreshPending(workflow)) {
       localStorage.removeItem(PENDING_AUTO_KEY);
       localStorage.removeItem(PENDING_AUTO_QUEUE_KEY);
+      localStorage.removeItem(PENDING_AUTO_RUN_KEY);
       return;
     }
     if (!workflow?.contactId) return;
@@ -3730,7 +3990,7 @@
           );
           if (confirmed) {
             markWorkflowTransition(latest);
-            setTimeout(() => launchNextAutoWorkflow(false, { completed: true }), AUTO_STEP_DELAY);
+            setTimeout(() => completeAutoWorkflow(latest, false, { completed: true, workflow: latest }), AUTO_STEP_DELAY);
           } else {
             blockAutoWorkflow(latest, `programmation non confirmee pour ${latest.adherent || "le contact"}`);
           }
@@ -4286,6 +4546,31 @@
     return scored.find(item => item.allowed) || null;
   }
 
+  function findUnavailableScheduleRow(pending) {
+    const rows = [...document.querySelectorAll("table[data-datatable='activity-schedules'] tbody tr, table.dataTable tbody tr")]
+      .filter(row => cleanText(row.textContent || ""));
+
+    return rows.map(row => {
+      const text = cleanText(row.textContent || "");
+      const normalized = normalize(text);
+      const actionText = normalize(row.querySelector("td:last-child")?.textContent || "");
+      const action = [...row.querySelectorAll("a, button, input[type='submit']")].find(el => (
+        normalize(el.textContent || el.value || "").includes("ajouter") &&
+        !normalize(el.textContent || el.value || "").includes("attente")
+      ));
+      const textCheck = scheduleTextCheckFromPending(pending, text);
+      const unavailable = normalized.includes("non disponible") ||
+        normalized.includes("plus de place") ||
+        normalized.includes("complet") ||
+        actionText.includes("non disponible");
+
+      return {
+        text,
+        unavailable: textCheck.ok && unavailable && !action
+      };
+    }).find(item => item.unavailable) || null;
+  }
+
   function scoreVisibleScheduleRow(pending, row) {
     return evaluateVisibleScheduleRow(pending, row).score;
   }
@@ -4428,8 +4713,11 @@
       message: cleanText(message || ""),
       total,
       done,
+      autoAll: Boolean(options?.autoAll ?? activeWorkflow?.autoAll ?? previous.autoAll),
+      contactIndex: Number(options?.contactIndex ?? getAutoContactIndex(activeWorkflow, done, total)),
       current: activeWorkflow ? shortLabel(activeWorkflow.adherent || activeWorkflow.label || "Contact") : "",
       stage: activeWorkflow?.stage || "",
+      steps: options?.steps || autoProgressSteps(activeWorkflow),
       errors: errors.slice(-8).map(item => ({
         adherent: shortLabel(item.adherent || item.workflow?.adherent || "Contact"),
         stage: item.stage || item.workflow?.stage || "",
@@ -4455,6 +4743,33 @@
     renderAutoProgress(next);
   }
 
+  function getAutoContactIndex(workflow, done, total) {
+    if (workflow && Number.isFinite(Number(workflow.runIndex))) return Number(workflow.runIndex) + 1;
+    if (!total) return 0;
+    return Math.min(total, Number(done || 0) + 1);
+  }
+
+  function autoProgressSteps(workflow) {
+    if (!workflow) return [];
+
+    return [
+      { label: "Justificatif", status: autoStepStatus(workflow, "address", "needsAddressProof") },
+      { label: "Adhesion", status: autoStepStatus(workflow, "adhesion", "needsAdhesion") },
+      { label: "Programmation", status: autoStepStatus(workflow, "schedule", "needsSchedule") }
+    ];
+  }
+
+  function autoStepStatus(workflow, stage, needKey) {
+    if (workflow[needKey] === false) return "Ok";
+    if (workflow.stage === stage) return "En cours";
+
+    const order = ["address", "adhesion", "schedule"];
+    const current = order.indexOf(workflow.stage);
+    const target = order.indexOf(stage);
+    if (current > target) return "Ok";
+    return "A faire";
+  }
+
   function autoStageLabel(stage) {
     if (stage === "address") return "Justificatif";
     if (stage === "adhesion") return "Adhesion";
@@ -4476,6 +4791,7 @@
       message,
       done: Number(previous.total || state.rows.length || 0),
       total: Number(previous.total || state.rows.length || 0),
+      autoAll: true,
       okCount,
       issueCount,
       errors,
@@ -4519,7 +4835,7 @@
   }
 
   function renderAutoProgressHtml(data) {
-    const title = data.mode === "final" ? "Recap Auto tous" : "Auto tous";
+    const title = data.mode === "final" ? "Recap Auto tous" : data.autoAll ? "Auto tous" : "Auto";
     const done = Math.max(0, Number(data.done || 0));
     const total = Math.max(done, Number(data.total || 0));
     const progress = total ? `Termines : ${done}/${total}` : "";
@@ -4534,14 +4850,26 @@
         `<div><strong>${escapeHtml(item.adherent || "Contact")}</strong> - ${escapeHtml(item.reason || "")}</div>`
       )).join("")}</div>`
       : "";
+    const runningMeta = total && data.mode !== "final"
+      ? `Contact ${Math.max(1, Number(data.contactIndex || done + 1))}/${total}`
+      : meta;
+    const stepsHtml = data.mode !== "final" && data.steps?.length
+      ? `<div class="fx-mm-auto-steps">${data.steps.map(step => (
+        `<span><strong>${escapeHtml(step.label)}</strong> : ${escapeHtml(step.status)}</span>`
+      )).join("")}</div>`
+      : "";
+    const messageHtml = data.mode === "final" || !stepsHtml
+      ? `<div class="fx-mm-auto-message">${escapeHtml(data.message || "")}</div>`
+      : `<div class="fx-mm-auto-message">${escapeHtml(data.current || data.message || "")}</div>`;
 
     return `
       <div class="fx-mm-auto-progress">
         <div class="fx-mm-auto-progress-head">
           <strong>${escapeHtml(title)}</strong>
-          <span>${escapeHtml(meta)}</span>
+          <span>${escapeHtml(runningMeta)}</span>
         </div>
-        <div class="fx-mm-auto-message">${escapeHtml(data.message || "")}</div>
+        ${messageHtml}
+        ${stepsHtml}
         ${errorHtml}
       </div>
     `;
@@ -4839,6 +5167,17 @@
 
       .fx-mm-auto-message {
         padding: 8px 10px 10px;
+      }
+
+      .fx-mm-auto-steps {
+        display: grid;
+        gap: 4px;
+        padding: 0 10px 10px;
+      }
+
+      .fx-mm-auto-steps span {
+        color: #344054;
+        font-size: 12px;
       }
 
       .fx-mm-auto-errors {
