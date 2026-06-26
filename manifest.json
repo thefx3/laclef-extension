@@ -43,6 +43,7 @@
         "src/content/aniapps-programmations.js",
         "src/content/aniapps-music-converter.js",
         "src/content/aniapps-music-members.js",
+        "src/content/aniapps-family-balances.js",
         "src/content/aniapps-compare-programmations.js",
         "src/content/aniapps-export-tarifs.js",
         "src/content/aniapps-agenda-live.js",

@@ -160,20 +160,31 @@
       `;
     }
 
-    const items = [...sideMenu.querySelectorAll(":scope > li")];
-    const flce = document.querySelector("#fx-flce-nav-item");
-    const familles = items.find(item => getTopLabel(item) === "Familles");
-
-    if (flce?.parentElement === sideMenu && flce.nextElementSibling !== li) {
-      flce.insertAdjacentElement("afterend", li);
-    } else if (familles && li.nextElementSibling !== familles) {
-      familles.insertAdjacentElement("beforebegin", li);
-    } else if (!li.parentElement) {
+    if (!li.parentElement) {
       sideMenu.appendChild(li);
     }
 
+    syncCustomSidebarOrder(sideMenu);
     li.style.display = "";
     highlightSidebar(isPage());
+  }
+
+  function syncCustomSidebarOrder(sideMenu) {
+    const ordered = [
+      document.querySelector("#fx-flce-nav-item"),
+      document.querySelector("#fx-music-members-nav-item"),
+      document.querySelector("#fx-family-balances-nav-item")
+    ].filter(item => item?.parentElement === sideMenu);
+    const familles = [...sideMenu.querySelectorAll(":scope > li")].find(item => getTopLabel(item) === "Familles");
+    if (!familles || !ordered.length) return;
+
+    let anchor = familles;
+    [...ordered].reverse().forEach(item => {
+      if (item.nextElementSibling !== anchor) {
+        anchor.insertAdjacentElement("beforebegin", item);
+      }
+      anchor = item;
+    });
   }
 
   function getTopLabel(li) {

@@ -8,6 +8,7 @@ Extension Chrome locale pour automatiser des taches ANIAPPS et billetterie La CL
 - ANIAPPS paiements famille : bouton `Generer SEPA` pour creer une serie de mensualites.
 - ANIAPPS programmations : panneau `Auto programmations` pour coller un tableau JSON et lancer la duplication/remplissage.
 - ANIAPPS exports : bouton `Exporter + tarifs` pour exporter les programmations avec code inscription, type tarif et tarif.
+- ANIAPPS soldes familles : onglet `Soldes familles` pour coller une liste de mails, retrouver les familles, verifier justificatif, souscriptions actives et solde de la saison.
 - ANIAPPS contacts -> billetterie : bouton `Copier billetterie`, puis bouton `Remplir depuis ANIAPPS` sur la billetterie.
 - Popup Chrome : affiche le dernier client copie et propose des raccourcis vers les deux outils.
 
@@ -87,6 +88,20 @@ L'extension :
 3. ouvre en arriere-plan la page d'edition correspondante ;
 4. ajoute `Code inscription`, `Type tarif` et `Tarif` a la ligne correspondante ;
 5. telecharge un CSV final limite aux colonnes utiles.
+
+### Soldes familles
+
+Va sur ANIAPPS admin puis clique sur `Soldes familles` dans le menu lateral.
+Colle une selection Google Sheets contenant des mails, choisis la saison, puis clique sur `Chercher familles`.
+
+L'extension regroupe les mails par famille et affiche :
+
+- le nom de la famille ;
+- le justificatif de domicile valide pour la saison ;
+- les souscriptions actives de chaque adherent, adhesion comprise ;
+- le solde global a payer, ou l'avoir si le solde est negatif.
+
+Les souscriptions arretees, annulees ou avec date d'arret sont ignorees. Le bouton `Copier export` produit un TSV recollable dans Google Sheets.
 
 ### Billetterie
 

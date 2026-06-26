@@ -159,20 +159,34 @@ function ensureFlceSidebarTab() {
     });
   }
 
-  const items = [...sideMenu.querySelectorAll(":scope > li")];
-  const famillesLi = items.find(li => getTopLabel(li) === "Familles");
-
-  if (famillesLi && flceLi.nextElementSibling !== famillesLi) {
-    famillesLi.insertAdjacentElement("beforebegin", flceLi);
-  } else if (!flceLi.parentElement) {
+  if (!flceLi.parentElement) {
     sideMenu.appendChild(flceLi);
   }
 
+  syncCustomSidebarOrder(sideMenu);
   flceLi.style.display = "";
   flceLi.style.pointerEvents = "auto";
 
   highlightSidebar(isFlcePage());
 }
+
+  function syncCustomSidebarOrder(sideMenu) {
+    const ordered = [
+      document.querySelector("#fx-flce-nav-item"),
+      document.querySelector("#fx-music-members-nav-item"),
+      document.querySelector("#fx-family-balances-nav-item")
+    ].filter(item => item?.parentElement === sideMenu);
+    const famillesLi = [...sideMenu.querySelectorAll(":scope > li")].find(li => getTopLabel(li) === "Familles");
+    if (!famillesLi || !ordered.length) return;
+
+    let anchor = famillesLi;
+    [...ordered].reverse().forEach(item => {
+      if (item.nextElementSibling !== anchor) {
+        anchor.insertAdjacentElement("beforebegin", item);
+      }
+      anchor = item;
+    });
+  }
 
   function getTopLabel(li) {
     return (li.querySelector(":scope > a .nav-label")?.textContent || "").trim();
