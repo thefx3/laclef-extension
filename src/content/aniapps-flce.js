@@ -28,6 +28,11 @@
       "src/templates/Inscription.docx",
       "src/templates/inscription.docx",
       "src/templates/inscriptions.docx"
+    ],
+    assiduite: [
+      "src/templates/Certificat d'assiduité.docx",
+      "src/templates/Certificat d'assiduite.docx",
+      "src/templates/certificat-assiduite.docx"
     ]
   };
   const CERTIFICATE_IMAGE_ENTRIES = {
@@ -42,6 +47,12 @@
       address: "word/media/image4.png",
       signature: "word/media/image3.png",
       footer: "word/media/image2.png"
+    },
+    assiduite: {
+      logo: "word/media/image3.png",
+      address: "word/media/image2.png",
+      signature: "word/media/image1.png",
+      footer: "word/media/image4.png"
     }
   };
 
@@ -1210,6 +1221,11 @@ function ensureFlceSidebarTab() {
               <i class="fa fa-file-pdf-o"></i> Inscription
             </button>
           `);
+          buttons.push(`
+            <button type="button" class="btn btn-xs btn-info fx-flce-doc-btn" data-row-index="${index}" data-fx-doc-type="assiduite">
+              <i class="fa fa-file-pdf-o"></i> Assiduité
+            </button>
+          `);
         }
 
         return `
@@ -1289,6 +1305,7 @@ function ensureFlceSidebarTab() {
     if (!settings.start) missing.push("debut des cours");
     if (!settings.end) missing.push("fin des cours");
     if (type === "preinscription" && !settings.amount) missing.push("montant de preinscription");
+    if (type === "assiduite" && !extractFlceLevel(student.classe)) missing.push("niveau CECRL dans la classe");
 
     if (missing.length) {
       throw new Error(`Parametres manquants : ${missing.join(", ")}.`);
@@ -1318,6 +1335,9 @@ function ensureFlceSidebarTab() {
       Debut: settings.start,
       Fin: settings.end,
       Montant: settings.amount,
+      Niveau: extractFlceLevel(student.classe),
+      NiveauAssiduite: buildAssiduiteLevelText(extractFlceLevel(student.classe)),
+      "Il/Elle": civilitePronoun(student.civilite),
       "Civilité": student.civilite || "",
       Civilite: student.civilite || "",
       Nom: student.nom || "",
@@ -1325,6 +1345,26 @@ function ensureFlceSidebarTab() {
       Prenom: student.prenom || "",
       Date: today
     };
+  }
+
+  function extractFlceLevel(value) {
+    const text = String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase();
+    const match = text.match(/\b(A1|A2|B1|B2|C1|C2)\b/);
+    if (match) return match[1];
+    if (text.includes("PERFECTIONNEMENT")) return "Perfectionnement";
+    return "";
+  }
+
+  function buildAssiduiteLevelText(level) {
+    if (!level) return "";
+    if (/^[ABC][12]$/.test(level)) return `validé le niveau ${level} CECRL`;
+    return `suivi le niveau ${level}`;
+  }
+
+  function civilitePronoun(value) {
+    const text = normalize(value);
+    if (text.includes("monsieur") || text === "m") return "Il";
+    return "Elle";
   }
 
   function formatSeasonForDocument(value) {
@@ -1545,8 +1585,102 @@ function ensureFlceSidebarTab() {
   function createCertificatePdf(type, context, images) {
     const pageWidth = 595.28;
     const pageHeight = 841.89;
-    const page = buildCertificatePage(type, context, pageWidth, images);
+    const page = type === "assiduite"
+      ? buildAssiduiteCertificatePage(context, pageWidth, images)
+      : buildCertificatePage(type, context, pageWidth, images);
     return buildPdfBlob([page], pageWidth, pageHeight);
+  }
+
+  function buildAssiduiteCertificatePage(context, pageWidth, images) {
+    const lines = [];
+    const imagePlacements = [];
+    const drawings = [];
+    const marginX = 82;
+    const maxWidth = pageWidth - marginX * 2;
+    let y = 648;
+
+    const placeImage = (resource, x, bottomY, width) => {
+      if (!resource?.hex || !resource.width || !resource.height) return;
+
+      imagePlacements.push({
+        resource,
+        x,
+        y: bottomY,
+        width,
+        height: width * resource.height / resource.width
+      });
+    };
+
+    const rect = (x, bottomY, width, height) => {
+      drawings.push({ type: "rect", x, y: bottomY, width, height });
+    };
+
+    const add = (text, x, options = {}) => {
+      lines.push({
+        text,
+        x,
+        y: options.y ?? y,
+        size: options.size || 12,
+        font: options.font || "F1"
+      });
+    };
+
+    const center = (text, options = {}) => {
+      const size = options.size || 12;
+      const font = options.font || "F1";
+      add(text, (pageWidth - pdfTextWidth(text, size, font)) / 2, { size, font, y: options.y });
+    };
+
+    const paragraph = (text, options = {}) => {
+      const size = options.size || 12;
+      const font = options.font || "F1";
+      const lineHeight = options.lineHeight || 18;
+      const indent = options.indent || 0;
+
+      wrapPdfText(text, size, maxWidth - indent).forEach(line => {
+        add(line, marginX + indent, { size, font });
+        y -= lineHeight;
+      });
+
+      y -= options.after ?? 10;
+    };
+
+    placeImage(images?.logo, 48, 750, 58);
+    placeImage(images?.footer, 132, 24, 332);
+
+    rect(44, 704, 508, 34);
+    center("CERTIFICAT D'ASSIDUITÉ", { size: 15, font: "F2", y: 715 });
+    y = 674;
+    center(`SAISON ${context.Saison}`, { size: 13, font: "F2" });
+    y -= 48;
+
+    paragraph("Je, soussigné Franck MICHAUT, directeur de La CLEF, certifie que :", { after: 20 });
+
+    center(`${context.Civilité} ${context.Nom} ${context.Prénom}`, { size: 12, font: "F2" });
+    y -= 44;
+
+    paragraph(`A suivi avec assiduité les cours de Français Langue et Culture Étrangère du ${context["Début"]} au ${context.Fin}.`);
+    paragraph(`${context["Il/Elle"]} a consacré dix heures par semaine à l'étude du français et ${context.NiveauAssiduite}, en a acquis les compétences, en compréhension et production, à l'oral comme à l'écrit.`);
+    paragraph(`${context.Civilité} ${context.Nom} ${context.Prénom} a fait preuve d'un réel intérêt, tant pour la culture que pour la langue française.`);
+    paragraph("Attestation faite de bonne foi pour servir ce que de droit.", { after: 34 });
+
+    paragraph("A Saint-Germain-en-Laye,", { after: 6 });
+    paragraph(`Le ${context.Date}`, { after: 16 });
+
+    placeImage(images?.signature, 474, 220, 78);
+
+    y = 244;
+    add("Franck MICHAUT", 370, { size: 10 });
+    y -= 14;
+    add("Directeur", 370, { size: 10 });
+    y -= 14;
+    add("P/o François-Xavier PAIRAULT", 370, { size: 10 });
+    y -= 14;
+    add("Suivi étudiants FLCE", 370, { size: 10 });
+
+    placeImage(images?.address, 370, 112, 126);
+
+    return { lines, images: imagePlacements, drawings };
   }
 
   function buildCertificatePage(type, context, pageWidth, images) {
@@ -1640,7 +1774,7 @@ function ensureFlceSidebarTab() {
     paragraph("A Saint-Germain-en-Laye,", { after: 6 });
     paragraph(`Le ${context.Date}`, { after: 16 });
 
-    placeImage(images?.signature, 490, 238, 54);
+    placeImage(images?.signature, 474, 220, 78);
 
     y = 244;
     add("Franck MICHAUT", 370, { size: 10 });
@@ -1660,7 +1794,7 @@ function ensureFlceSidebarTab() {
     const words = text.split(/\s+/).filter(Boolean);
     const lines = [];
     let line = "";
-    const approxCharWidth = fontSize * 0.52;
+    const approxCharWidth = fontSize * 0.46;
     const maxChars = Math.max(28, Math.floor(maxWidth / approxCharWidth));
 
     words.forEach(word => {
